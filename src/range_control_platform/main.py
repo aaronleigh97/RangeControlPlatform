@@ -31,3 +31,7 @@ def create_app():
     register_validation_callbacks(app)
     register_report_callbacks(app)
     return app
+
+
+if __name__ == "__main__":
+    create_app().run_server(debug=True)
