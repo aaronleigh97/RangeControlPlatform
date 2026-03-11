@@ -1,16 +1,33 @@
-﻿# This is a sample Python script.
+from dash import Dash, dcc, html
+import dash_bootstrap_components as dbc
 
-# Press Shift+F10 to execute it or replace it with your code.
-# Press Double Shift to search everywhere for classes, files, tool windows, actions, and settings.
+from range_control_platform.controllers.admin_controller import register_admin_callbacks
+from range_control_platform.controllers.plan_controller import register_plan_callbacks
+from range_control_platform.controllers.ref_data_controller import register_ref_data_callbacks
+from range_control_platform.controllers.report_controller import register_report_callbacks
+from range_control_platform.controllers.router import register_router
+from range_control_platform.controllers.validation_controller import register_validation_callbacks
+from range_control_platform.views.layout import app_shell
 
 
-def print_hi(name):
-    # Use a breakpoint in the code line below to debug your script.
-    print(f'Hi, {name}')  # Press Ctrl+F8 to toggle the breakpoint.
-
-
-# Press the green button in the gutter to run the script.
-if __name__ == '__main__':
-    print_hi('PyCharm')
-
-# See PyCharm help at https://www.jetbrains.com/help/pycharm/
+def create_app():
+    app = Dash(
+        __name__,
+        external_stylesheets=[dbc.themes.BOOTSTRAP],
+        suppress_callback_exceptions=True,
+    )
+    app.layout = app_shell(
+        html.Div(
+            [
+                dcc.Location(id="url"),
+                html.Div(id="page-content"),
+            ]
+        )
+    )
+    register_router(app)
+    register_ref_data_callbacks(app)
+    register_admin_callbacks(app)
+    register_plan_callbacks(app)
+    register_validation_callbacks(app)
+    register_report_callbacks(app)
+    return app
