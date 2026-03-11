@@ -1,0 +1,29 @@
+﻿steps:
+  # Deploy container image to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - '$_SERVICE_NAME'
+      - '--image'
+      - 'gcr.io/$PROJECT_ID/$_SERVICE_NAME:$_GCR_TAG'
+      - '--region'
+      - 'europe-west2'
+      - '--project'
+      - '${_APP_PROJECT_ID}'
+      - '--update-env-vars'
+      - 'ENV=PPD'
+  # Build the container image
+  - name: 'gcr.io/cloud-builders/docker'
+    entrypoint: 'bash'
+    args:
+      - '-eEuo'
+      - 'pipefail'
+      - '-c'
+      - |-
+        docker pull gcr.io/$PROJECT_ID/$_SERVICE_NAME:$_GCR_TAG && \
+        docker tag gcr.io/$PROJECT_ID/$_SERVICE_NAME:$_GCR_TAG gcr.io/$PROJECT_ID/$_SERVICE_NAME:ppd-latest && \
+        docker push gcr.io/$PROJECT_ID/$_SERVICE_NAME:ppd-latest
+images:
+  - 'gcr.io/$PROJECT_ID/$_SERVICE_NAME:ppd-latest'

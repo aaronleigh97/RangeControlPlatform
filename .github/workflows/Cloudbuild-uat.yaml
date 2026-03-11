@@ -1,0 +1,36 @@
+﻿steps:
+  # Build the container image
+  - name: 'gcr.io/cloud-builders/docker'
+    entrypoint: 'sh'
+    args:
+      - '-c'
+      - 'docker build -t gcr.io/$PROJECT_ID/$_SERVICE_NAME:$COMMIT_SHA -t gcr.io/$PROJECT_ID/$_SERVICE_NAME:uat-latest -t gcr.io/$PROJECT_ID/$_SERVICE_NAME:$TAG_NAME --build-arg MERCH_APP_SHARED_SA_SECRET_TOKEN=$$MERCH_APP_SHARED_SA_SECRET_TOKEN .'
+    secretEnv:
+      - 'MERCH_APP_SHARED_SA_SECRET_TOKEN'
+
+  # Push the container image to Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push','--all-tags','gcr.io/$PROJECT_ID/$_SERVICE_NAME']
+  # Deploy container image to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - '$_SERVICE_NAME'
+      - '--image'
+      - 'gcr.io/$PROJECT_ID/$_SERVICE_NAME:$TAG_NAME'
+      - '--region'
+      - 'europe-west2'
+      - '--project'
+      - '${_APP_PROJECT_ID}'
+      - '--update-env-vars'
+      - 'ENV=UAT'
+images:
+  - 'gcr.io/$PROJECT_ID/$_SERVICE_NAME:uat-latest'
+  - 'gcr.io/$PROJECT_ID/$_SERVICE_NAME:$TAG_NAME'
+  - 'gcr.io/$PROJECT_ID/$_SERVICE_NAME:$COMMIT_SHA'
+availableSecrets:
+  secretManager:
+  - versionName: projects/329267460294/secrets/MERCH_APP_SHARED_SA_SECRET_TOKEN/versions/latest
+    env: 'MERCH_APP_SHARED_SA_SECRET_TOKEN'
