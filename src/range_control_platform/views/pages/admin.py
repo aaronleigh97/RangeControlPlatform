@@ -8,7 +8,7 @@ def layout():
                 html.H3("Admin"),
                 html.P(
                     "This page will manage reference configuration: allocations (space), budgets, "
-                    "grade entitlements, stand limits, etc. For now, it just shows seed data."
+                    "grade entitlements, stand limits, etc. For now, it shows the loaded reference data."
                 ),
 
                 dbc.Row(
@@ -25,6 +25,12 @@ def layout():
                                         {"label": "Categories", "value": "categories"},
                                         {"label": "Stand Limits", "value": "stand_limits"},
                                         {"label": "Branches", "value": "branches"},
+                                        {"label": "Stores", "value": "stores"},
+                                        {
+                                            "label": "Department Grade Allocations",
+                                            "value": "department_grade_allocations",
+                                        },
+                                        {"label": "Stand Library", "value": "stand_library"},
                                     ],
                                     value="facias",
                                     clearable=False,
