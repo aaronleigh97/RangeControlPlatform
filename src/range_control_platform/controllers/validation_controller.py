@@ -1,23 +1,43 @@
 from dash import Input, Output, State, html, no_update
-from range_control_platform.services.plan_service import persist_validation_result_to_csv
+
+from range_control_platform.services.plan_service import (
+    compute_stand_count,
+    persist_validation_result_to_csv,
+)
+from range_control_platform.services.validation_logic import build_validation_result
+
+
+def _fmt_number(value):
+    if value is None:
+        return "N/A"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "N/A"
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:.2f}"
 
 
 def register_validation_callbacks(app):
-    # Show plan summary on the page
     @app.callback(
         Output("current-plan-summary", "children"),
         Input("plan-store", "data"),
     )
     def show_plan(plan):
         if not plan:
-            return html.Div("No plan created yet.")
+            return html.Div("No saved plan available yet.")
 
         return html.Ul(
             [
                 html.Li(f"Branch ID: {plan.get('branch_id')}"),
                 html.Li(f"Facia: {plan.get('facia')}"),
                 html.Li(f"Department: {plan.get('department')}"),
-                html.Li(f"Stand count: {plan.get('stand_count', 0)}"),
+                html.Li(f"Store grade: {plan.get('store_grade') or 'N/A'}"),
+                html.Li(f"Allowed space: {_fmt_number(plan.get('allowed_space'))}"),
+                html.Li(f"Used space: {_fmt_number(plan.get('used_space'))}"),
+                html.Li(f"Remaining space: {_fmt_number(plan.get('remaining_space'))}"),
+                html.Li(f"Stand quantity: {compute_stand_count(plan.get('selected_stands'))}"),
                 html.Li(f"Updated: {plan.get('updated_at')}"),
             ]
         )
@@ -33,7 +53,6 @@ def register_validation_callbacks(app):
             "last_run_click_ts": (existing_validation or {}).get("last_run_click_ts")
         }
 
-    # Run validation and persist result in global store so it survives page navigation
     @app.callback(
         Output("validation-store", "data"),
         Input("run-validation-btn", "n_clicks_timestamp"),
@@ -49,79 +68,22 @@ def register_validation_callbacks(app):
         if (existing_validation or {}).get("last_run_click_ts") == click_ts:
             return no_update
 
-        if not plan:
-            return {
-                "message": "No plan found. Create a plan first.",
-                "color": "warning",
-                "details": [],
-                "last_run_click_ts": click_ts,
-            }
-        if not ref_data:
-            return {
-                "message": "Reference data not loaded.",
-                "color": "warning",
-                "details": [],
-                "last_run_click_ts": click_ts,
-            }
-
-        # Find branch grade from branches list
-        branch_id = plan.get("branch_id")
-        branches = ref_data.get("branches", [])
-        branch = next((b for b in branches if b.get("branch_id") == branch_id), None)
-        if not branch:
-            return {
-                "message": f"Branch {branch_id} not found in reference data.",
-                "color": "danger",
-                "details": [],
-                "last_run_click_ts": click_ts,
-            }
-
-        grade = branch.get("grade")
-        stand_limits = ref_data.get("stand_limits", {})
-        allowed = stand_limits.get(grade)
-
-        if allowed is None:
-            return {
-                "message": f"No stand limit configured for grade {grade}.",
-                "color": "danger",
-                "details": [],
-                "last_run_click_ts": click_ts,
-            }
-
-        planned = int(plan.get("stand_count", 0))
+        result = build_validation_result(plan, ref_data, click_ts)
         validated_at = plan.get("updated_at") or ""
 
-        if planned <= allowed:
+        if result.get("validation_status") == "PASS":
             try:
                 persist_validation_result_to_csv(plan, "PASS", validated_at)
             except Exception:
                 pass
-            return {
-                "message": "PASS: Stand limit within allowance.",
-                "color": "success",
-                "details": [
-                    f"Grade {grade} allows up to {allowed} stands.",
-                    f"Plan requests {planned} stands.",
-                ],
-                "last_run_click_ts": click_ts,
-            }
+            return result
 
-        # fail case
-        breach = planned - allowed
-        try:
-            persist_validation_result_to_csv(plan, "FAIL", validated_at)
-        except Exception:
-            pass
-        return {
-            "message": "FAIL: Stand limit exceeded.",
-            "color": "danger",
-            "details": [
-                f"Grade {grade} allows up to {allowed} stands.",
-                f"Plan requests {planned} stands.",
-                f"Over by {breach} stand(s).",
-            ],
-            "last_run_click_ts": click_ts,
-        }
+        if result.get("validation_status") == "FAIL":
+            try:
+                persist_validation_result_to_csv(plan, "FAIL", validated_at)
+            except Exception:
+                pass
+        return result
 
     @app.callback(
         Output("validation-alert", "children"),

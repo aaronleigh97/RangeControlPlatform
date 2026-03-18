@@ -6,7 +6,7 @@ def layout():
         dbc.CardBody(
             [
                 html.H3("Validation"),
-                html.P("Validate the current plan against configured constraints."),
+                html.P("Validate the saved plan against store-grade department space allowances."),
 
                 html.H5("Current Plan"),
                 html.Div(id="current-plan-summary"),
