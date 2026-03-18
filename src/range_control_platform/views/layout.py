@@ -1,7 +1,6 @@
 ﻿from dash import html, dcc
 import dash_bootstrap_components as dbc
 from range_control_platform.config import settings
-from range_control_platform.data.seed import seed_reference_data
 
 NAV_ITEMS = [
     ("Home", "/"),
@@ -22,7 +21,7 @@ def build_nav():
     className="pt-2"
     )
 
-def app_shell(page_container):
+def app_shell(page_container, initial_ref_data=None):
     return dbc.Container(
         fluid=True,
         children=[
@@ -38,8 +37,15 @@ def app_shell(page_container):
                 dark=True,
                 className="mt-3",
             ),
+            dbc.Alert(
+                id="ref-data-alert",
+                is_open=False,
+                color="warning",
+                className="mt-2 mb-2",
+            ),
             # Global State Stores
-            dcc.Store(id="ref-data-store", data=seed_reference_data()),
+            dcc.Store(id="ref-data-store", data=initial_ref_data),
+            dcc.Store(id="plan-draft-store"),
             dcc.Store(id="plan-store"),
             dcc.Store(id="validation-store"),
             dcc.Store(id="audit-store"),

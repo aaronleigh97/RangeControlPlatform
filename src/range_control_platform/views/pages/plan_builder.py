@@ -7,7 +7,9 @@ def layout():
         dbc.CardBody(
             [
                 html.H3("Plan Builder"),
-                html.P("Build a new plan, or load a previously saved local snapshot."),
+                html.P(
+                    "Build a department plan from the BigQuery-backed store, allocation, and stand-library data."
+                ),
 
                 dbc.Row(
                     [
@@ -82,20 +84,55 @@ def layout():
                         ),
                         dbc.Col(
                             [
-                                dbc.Label("Planned Stand Count"),
+                                dbc.Label("Stand From Library"),
+                                dcc.Dropdown(
+                                    id="stand-library-dd",
+                                    placeholder="Select a stand",
+                                    disabled=True,
+                                    persistence=True,
+                                    persistence_type="session",
+                                ),
+                            ],
+                            width=6,
+                        ),
+                        dbc.Col(
+                            [
+                                dbc.Label("Quantity To Add"),
                                 dcc.Input(
-                                    id="stand-count",
+                                    id="stand-qty",
                                     type="number",
-                                    min=0,
+                                    min=1,
                                     step=1,
-                                    value=0,
+                                    value=1,
                                     disabled=True,
                                     persistence=True,
                                     persistence_type="session",
                                     style={"width": "100%"},
                                 ),
                             ],
-                            width=4,
+                            width=2,
+                        ),
+                        dbc.Col(
+                            dbc.Button(
+                                "Add Stand",
+                                id="add-stand-btn",
+                                color="secondary",
+                                className="w-100",
+                                disabled=True,
+                            ),
+                            width=2,
+                            className="d-flex align-items-end",
+                        ),
+                        dbc.Col(
+                            dbc.Button(
+                                "Clear Stands",
+                                id="clear-stands-btn",
+                                color="light",
+                                className="w-100",
+                                disabled=True,
+                            ),
+                            width=2,
+                            className="d-flex align-items-end",
                         ),
                     ],
                     className="g-2",
@@ -103,8 +140,17 @@ def layout():
 
                 html.Hr(),
 
+                html.Div(id="plan-summary"),
+
+                html.Hr(),
+
+                html.H5("Selected Stands"),
+                html.Div(id="selected-stands-table"),
+
+                html.Hr(),
+
                 dbc.Button(
-                    "Create / Update Plan",
+                    "Save Plan Snapshot",
                     id="plan-save-btn",
                     color="primary",
                     disabled=True,
