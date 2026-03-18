@@ -1,4 +1,5 @@
 import csv
+import json
 from collections import Counter
 from pathlib import Path
 
@@ -7,7 +8,12 @@ CSV_HEADERS = [
     "branch_id",
     "facia",
     "department",
+    "store_grade",
+    "allowed_space",
+    "used_space",
+    "remaining_space",
     "stand_count",
+    "selected_stands_json",
     "created_at",
     "updated_at",
     "saved_at",
@@ -41,6 +47,63 @@ def _safe_int(value, default=0):
         return default
 
 
+def _safe_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def compute_stand_count(selected_stands: list[dict] | None) -> int:
+    return sum(_safe_int(stand.get("quantity"), 0) for stand in (selected_stands or []))
+
+
+def compute_used_space(selected_stands: list[dict] | None) -> float:
+    return round(
+        sum(_safe_float(stand.get("total_sqm"), 0.0) for stand in (selected_stands or [])),
+        2,
+    )
+
+
+def normalize_selected_stands(selected_stands: list[dict] | None) -> list[dict]:
+    normalized = []
+    for stand in selected_stands or []:
+        quantity = _safe_int(stand.get("quantity"), 0)
+        sqm = _safe_float(stand.get("sqm"), 0.0)
+        if quantity <= 0:
+            continue
+        normalized.append(
+            {
+                "stand_id": stand.get("stand_id"),
+                "stand_name": stand.get("stand_name"),
+                "stand_type": stand.get("stand_type"),
+                "sqm": round(sqm, 2),
+                "quantity": quantity,
+                "total_sqm": round(quantity * sqm, 2),
+            }
+        )
+    normalized.sort(key=lambda item: str(item.get("stand_id") or ""))
+    return normalized
+
+
+def serialize_selected_stands(selected_stands: list[dict] | None) -> str:
+    return json.dumps(normalize_selected_stands(selected_stands), ensure_ascii=True)
+
+
+def deserialize_selected_stands(value) -> list[dict]:
+    if not value:
+        return []
+    if isinstance(value, list):
+        return normalize_selected_stands(value)
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return normalize_selected_stands(parsed)
+
+
 def make_plan_key(row: dict) -> str:
     return "|".join([
         str(row.get("branch_id") or ""),
@@ -49,18 +112,64 @@ def make_plan_key(row: dict) -> str:
     ])
 
 
+def _ensure_plan_csv_schema(csv_path: Path) -> None:
+    if not csv_path.exists():
+        return
+
+    with csv_path.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        existing_headers = next(reader, [])
+
+    if existing_headers == CSV_HEADERS:
+        return
+
+    with csv_path.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        existing_rows = list(reader)
+
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_HEADERS)
+        writer.writeheader()
+        for existing_row in existing_rows:
+            writer.writerow(
+                {
+                    "branch_id": existing_row.get("branch_id"),
+                    "facia": existing_row.get("facia"),
+                    "department": existing_row.get("department"),
+                    "store_grade": existing_row.get("store_grade"),
+                    "allowed_space": round(_safe_float(existing_row.get("allowed_space"), 0.0), 2),
+                    "used_space": round(_safe_float(existing_row.get("used_space"), 0.0), 2),
+                    "remaining_space": round(
+                        _safe_float(existing_row.get("remaining_space"), 0.0),
+                        2,
+                    ),
+                    "stand_count": _safe_int(existing_row.get("stand_count"), 0),
+                    "selected_stands_json": existing_row.get("selected_stands_json") or "[]",
+                    "created_at": existing_row.get("created_at"),
+                    "updated_at": existing_row.get("updated_at"),
+                    "saved_at": existing_row.get("saved_at"),
+                }
+            )
+
+
 def persist_plan_snapshot_to_csv(plan: dict) -> Path:
     """
     Append a snapshot row for the current plan to a CSV file.
     """
     csv_path = get_plan_csv_path()
     csv_path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_plan_csv_schema(csv_path)
 
     row = {
         "branch_id": plan.get("branch_id"),
         "facia": plan.get("facia"),
         "department": plan.get("department"),
-        "stand_count": plan.get("stand_count"),
+        "store_grade": plan.get("store_grade"),
+        "allowed_space": round(_safe_float(plan.get("allowed_space"), 0.0), 2),
+        "used_space": round(_safe_float(plan.get("used_space"), 0.0), 2),
+        "remaining_space": round(_safe_float(plan.get("remaining_space"), 0.0), 2),
+        "stand_count": compute_stand_count(plan.get("selected_stands")),
+        "selected_stands_json": serialize_selected_stands(plan.get("selected_stands")),
         "created_at": plan.get("created_at"),
         "updated_at": plan.get("updated_at"),
         "saved_at": plan.get("updated_at"),
@@ -88,6 +197,17 @@ def load_plan_snapshots_from_csv() -> list[dict]:
             clean = dict(row)
             clean["plan_key"] = make_plan_key(clean)
             clean["stand_count"] = _safe_int(clean.get("stand_count"), 0)
+            clean["allowed_space"] = _safe_float(clean.get("allowed_space"), 0.0)
+            clean["used_space"] = _safe_float(clean.get("used_space"), 0.0)
+            clean["remaining_space"] = _safe_float(clean.get("remaining_space"), 0.0)
+            clean["selected_stands"] = deserialize_selected_stands(clean.get("selected_stands_json"))
+            if clean["selected_stands"]:
+                clean["stand_count"] = compute_stand_count(clean["selected_stands"])
+                clean["used_space"] = compute_used_space(clean["selected_stands"])
+                clean["remaining_space"] = round(
+                    clean["allowed_space"] - clean["used_space"],
+                    2,
+                )
             rows.append(clean)
         return rows
 
