@@ -6,6 +6,40 @@ Product Grading & Space Control Tool
 ## Purpose of this plan
 This file turns the synoptic requirements into an execution order that can be used across sessions. It also records what appears to be complete already, what is partially built, and what still needs to be done.
 
+## Daily Update - 2026-03-19
+
+### Last completed
+- [x] Added branch-plan soft delete using `plans.is_active` so deleted plans drop out of the active snapshot list without requiring BigQuery hard deletes
+- [x] Added persisted `plan_name` support to the branch plan header and surfaced it in the Plan Builder and Saved Plan Snapshot dropdown
+- [x] Clarified the Plan Builder summary so branch context, current department space, and department-by-department breakdown are shown separately
+- [x] Updated saved-plan load/save status messaging so the latest logical plan stays selected and feedback appears at the top of the page
+- [x] Confirmed with the business that department allowance should be treated as `sqm`, then updated the UI wording to reflect that decision
+
+### In progress
+- [ ] Tidy the remaining temporary debug UI in the Plan Builder and continue polishing the branch-plan editing experience
+
+### Blockers
+- None currently blocking the branch-plan workflow
+
+### Next actions
+1. Remove the temporary `Draft Debug` panel once the latest branch-plan flow is considered stable
+2. Update the supporting docs/schema wording to reflect that department allowance is now confirmed as `sqm`
+3. Continue to the next business slice after builder polish rather than extending state/debug logic further
+
+### Files touched
+- `src/range_control_platform/controllers/plan_controller.py`
+- `src/range_control_platform/services/plan_service.py`
+- `src/range_control_platform/views/pages/plan_builder.py`
+- `tests/unit/test_plan_service.py`
+- `docs/Repository-Remote-Context.md`
+
+### Notes for next Codex session
+- Saved plans are now deduped in the active snapshot dropdown by logical branch-plan key, not by raw snapshot `plan_id`
+- Deleting a saved plan now writes a new inactive snapshot rather than attempting a BigQuery hard delete
+- `plan_name` now belongs on the branch-level `plans` header and is used as the primary user-facing label in the saved-plan dropdown
+- The status/flash message now appears near the top of the Plan Builder instead of below the save button
+- Department allowance is now confirmed as `sqm`, so the old linear-meter caveat should not be reintroduced
+
 ## Daily Update - 2026-03-18
 
 ### Last completed

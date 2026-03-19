@@ -10,6 +10,7 @@ def layout():
                 html.P(
                     "Build a branch plan from the BigQuery-backed store, allocation, and stand-library data."
                 ),
+                html.Div(id="plan-status", className="mb-3"),
 
                 dbc.Row(
                     [
@@ -33,7 +34,18 @@ def layout():
                                 className="w-100",
                                 disabled=True,
                             ),
-                            width=3,
+                            width=2,
+                            className="d-flex align-items-end",
+                        ),
+                        dbc.Col(
+                            dbc.Button(
+                                "Delete Selected Plan",
+                                id="plan-delete-btn",
+                                color="danger",
+                                className="w-100",
+                                disabled=True,
+                            ),
+                            width=2,
                             className="d-flex align-items-end",
                         ),
                     ],
@@ -44,6 +56,20 @@ def layout():
 
                 dbc.Row(
                     [
+                        dbc.Col(
+                            [
+                                dbc.Label("Plan Name"),
+                                dcc.Input(
+                                    id="plan-name-input",
+                                    type="text",
+                                    placeholder="Enter a plan alias",
+                                    persistence=True,
+                                    persistence_type="session",
+                                    style={"width": "100%"},
+                                ),
+                            ],
+                            width=12,
+                        ),
                         dbc.Col(
                             [
                                 dbc.Label("Facia"),
@@ -160,7 +186,6 @@ def layout():
                     color="primary",
                     disabled=True,
                 ),
-                html.Div(id="plan-status", className="mt-3"),
             ]
         )
     )

@@ -15,7 +15,11 @@ This folder breaks the project into discrete development segments so progress ca
 5. [Session-05-Cloudbuild-Structure.md](C:/Users/aaron/PycharmProjects/RangeControlPlatform/docs/development-log/Session-05-Cloudbuild-Structure.md)
 6. [Session-06-Synoptic-Planning-and-Evidence.md](C:/Users/aaron/PycharmProjects/RangeControlPlatform/docs/development-log/Session-06-Synoptic-Planning-and-Evidence.md)
 7. [Session-07-JD-Reference-Data-Integration.md](C:/Users/aaron/PycharmProjects/RangeControlPlatform/docs/development-log/Session-07-JD-Reference-Data-Integration.md)
-8. [Session-Template.md](C:/Users/aaron/PycharmProjects/RangeControlPlatform/docs/development-log/Session-Template.md)
+8. [Session-08-BigQuery-Reference-Data-Import-and-Repository-Wiring.md](C:/Users/aaron/PycharmProjects/RangeControlPlatform/docs/development-log/Session-08-BigQuery-Reference-Data-Import-and-Repository-Wiring.md)
+9. [Session-09-Plan-Builder-and-Validation-BigQuery-Flow.md](C:/Users/aaron/PycharmProjects/RangeControlPlatform/docs/development-log/Session-09-Plan-Builder-and-Validation-BigQuery-Flow.md)
+10. [Session-10-Branch-Plan-Draft-State-and-Multi-Department-Builder.md](C:/Users/aaron/PycharmProjects/RangeControlPlatform/docs/development-log/Session-10-Branch-Plan-Draft-State-and-Multi-Department-Builder.md)
+11. [Session-11-Plan-Naming-Soft-Delete-and-Builder-Polish.md](C:/Users/aaron/PycharmProjects/RangeControlPlatform/docs/development-log/Session-11-Plan-Naming-Soft-Delete-and-Builder-Polish.md)
+12. [Session-Template.md](C:/Users/aaron/PycharmProjects/RangeControlPlatform/docs/development-log/Session-Template.md)
 
 ## Current overall trajectory
 - The first stage focused on setting up the standalone application structure.

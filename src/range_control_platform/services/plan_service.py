@@ -1,4 +1,5 @@
 import csv
+from datetime import datetime, timezone
 import json
 import math
 from collections import Counter
@@ -15,6 +16,8 @@ CSV_HEADERS = [
     "branch_id",
     "facia",
     "department",
+    "plan_name",
+    "is_active",
     "store_grade",
     "allowed_space",
     "used_space",
@@ -60,6 +63,19 @@ def _safe_float(value, default=0.0):
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _safe_bool(value, default=True):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "1", "yes", "y"}:
+        return True
+    if normalized in {"false", "0", "no", "n"}:
+        return False
+    return default
 
 
 def _plan_dataset() -> str:
@@ -247,14 +263,13 @@ def summarize_plan_departments(plan: dict | None) -> dict:
 def branch_saved_plan_ref(plan: dict | None) -> str | None:
     if not plan:
         return None
-    return plan.get("plan_id") or plan.get("saved_plan_ref") or plan.get("plan_key")
+    return plan.get("plan_key") or plan.get("saved_plan_ref") or plan.get("plan_id")
 
 
 def make_plan_key(row: dict) -> str:
     return "|".join([
         str(row.get("branch_id") or ""),
         str(row.get("facia") or ""),
-        str(row.get("department") or ""),
     ])
 
 
@@ -283,6 +298,8 @@ def _ensure_plan_csv_schema(csv_path: Path) -> None:
                     "branch_id": existing_row.get("branch_id"),
                     "facia": existing_row.get("facia"),
                     "department": existing_row.get("department"),
+                    "plan_name": existing_row.get("plan_name"),
+                    "is_active": _safe_bool(existing_row.get("is_active"), True),
                     "store_grade": existing_row.get("store_grade"),
                     "allowed_space": round(_safe_float(existing_row.get("allowed_space"), 0.0), 2),
                     "used_space": round(_safe_float(existing_row.get("used_space"), 0.0), 2),
@@ -305,6 +322,8 @@ def _csv_row_from_plan(plan: dict) -> dict:
         "branch_id": plan.get("branch_id"),
         "facia": plan.get("facia"),
         "department": plan.get("department"),
+        "plan_name": plan.get("plan_name"),
+        "is_active": _safe_bool(plan.get("is_active"), True),
         "store_grade": plan.get("store_grade"),
         "allowed_space": round(_safe_float(plan.get("allowed_space"), 0.0), 2),
         "used_space": round(_safe_float(plan.get("used_space"), 0.0), 2),
@@ -321,6 +340,8 @@ def _plan_from_csv_row(row: dict) -> dict:
     clean = dict(row)
     clean["plan_id"] = clean.get("plan_id") or None
     clean["plan_key"] = make_plan_key(clean)
+    clean["plan_name"] = clean.get("plan_name") or None
+    clean["is_active"] = _safe_bool(clean.get("is_active"), True)
     clean["stand_count"] = _safe_int(clean.get("stand_count"), 0)
     clean["allowed_space"] = _safe_float(clean.get("allowed_space"), 0.0)
     clean["used_space"] = _safe_float(clean.get("used_space"), 0.0)
@@ -365,9 +386,11 @@ def _bigquery_plan_header_row(plan: dict) -> dict:
     return {
         "plan_id": str(uuid4()),
         "branch_id": str(plan.get("branch_id") or ""),
+        "plan_name": plan.get("plan_name"),
         "created_by": plan.get("created_by"),
         "created_at": plan.get("updated_at") or plan.get("created_at"),
         "status": plan.get("status") or "draft",
+        "is_active": _safe_bool(plan.get("is_active"), True),
     }
 
 
@@ -463,6 +486,7 @@ def _plan_from_bigquery_rows(rows: list[dict]) -> dict | None:
     plan = {
         "plan_id": first.get("plan_id"),
         "branch_id": first.get("branch_id"),
+        "plan_name": first.get("plan_name"),
         "branch_name": first.get("branch_name"),
         "facia": first.get("facia"),
         "department": current_department.get("department"),
@@ -473,6 +497,7 @@ def _plan_from_bigquery_rows(rows: list[dict]) -> dict | None:
         "updated_at": first.get("created_at"),
         "saved_at": first.get("created_at"),
         "status": first.get("status"),
+        "is_active": _safe_bool(first.get("is_active"), True),
         "plan_department_id": current_department.get("plan_department_id"),
         "allowed_space": current_department.get("allowed_space"),
         "allowed_space_unit": "linear_meter",
@@ -509,9 +534,11 @@ def _load_bigquery_plan_rows(saved_plan_ref: str | None = None) -> list[dict]:
     SELECT
       p.plan_id,
       p.branch_id,
+      p.plan_name,
       p.created_by,
       p.created_at,
       p.status,
+      p.is_active,
       pd.plan_department_id,
       pd.department_name,
       pd.store_grade AS persisted_store_grade,
@@ -551,16 +578,20 @@ def persist_plan_to_bigquery(plan: dict) -> dict:
     INSERT INTO `{dataset}.plans` (
       plan_id,
       branch_id,
+      plan_name,
       created_by,
       created_at,
-      status
+      status,
+      is_active
     )
     VALUES (
       {_sql_string(plan_header_row['plan_id'])},
       {_sql_string(plan_header_row['branch_id'])},
+      {_sql_string(plan_header_row['plan_name'])},
       {_sql_string(plan_header_row['created_by'])},
       {_sql_timestamp(plan_header_row['created_at'])},
-      {_sql_string(plan_header_row['status'])}
+      {_sql_string(plan_header_row['status'])},
+      {str(plan_header_row['is_active']).upper()}
     )
     """
     bigquery(plan_insert_sql)
@@ -634,6 +665,8 @@ def persist_plan_to_bigquery(plan: dict) -> dict:
         "saved_plan_ref": plan_id,
         "storage_backend": "bigquery",
         "status": plan_header_row["status"],
+        "is_active": plan_header_row["is_active"],
+        "plan_name": plan_header_row["plan_name"],
     }
 
 
@@ -665,7 +698,7 @@ def list_latest_plans() -> list[dict]:
     rows = load_plan_snapshots()
     latest_by_key = {}
     for row in rows:
-        key = row.get("saved_plan_ref") or row.get("plan_id") or row.get("plan_key") or make_plan_key(row)
+        key = row.get("plan_key") or make_plan_key(row)
         existing = latest_by_key.get(key)
         row_saved = row.get("saved_at") or row.get("updated_at") or ""
         existing_saved = (existing or {}).get("saved_at") or (existing or {}).get("updated_at") or ""
@@ -673,6 +706,7 @@ def list_latest_plans() -> list[dict]:
             latest_by_key[key] = row
 
     latest_rows = list(latest_by_key.values())
+    latest_rows = [row for row in latest_rows if _safe_bool(row.get("is_active"), True)]
     latest_rows.sort(key=lambda r: r.get("saved_at") or r.get("updated_at") or "", reverse=True)
     return latest_rows
 
@@ -707,6 +741,7 @@ def persist_plan(plan: dict) -> dict:
                 "storage_backend": "csv-fallback",
                 "storage_location": str(csv_path),
                 "storage_error": str(exc),
+                "is_active": _safe_bool(plan.get("is_active"), True),
             }
 
     csv_path = persist_plan_snapshot_to_csv(plan)
@@ -715,6 +750,7 @@ def persist_plan(plan: dict) -> dict:
         "saved_plan_ref": make_plan_key(plan),
         "storage_backend": "csv",
         "storage_location": str(csv_path),
+        "is_active": _safe_bool(plan.get("is_active"), True),
     }
 
 
@@ -741,6 +777,23 @@ def get_latest_plan_by_key(plan_key: str) -> dict | None:
         if row.get("plan_key") == plan_key:
             return row
     return None
+
+
+def deactivate_plan(saved_plan_ref: str, plan: dict | None = None) -> dict:
+    existing_plan = plan or get_saved_plan(saved_plan_ref)
+    if not existing_plan:
+        raise ValueError("Plan not found for deletion.")
+
+    now = datetime.now(timezone.utc).isoformat()
+    deletion_snapshot = {
+        **existing_plan,
+        "created_at": existing_plan.get("created_at") or existing_plan.get("saved_at") or now,
+        "updated_at": now,
+        "saved_at": now,
+        "status": "deleted",
+        "is_active": False,
+    }
+    return persist_plan(deletion_snapshot)
 
 
 def summarize_plan_snapshots(rows: list[dict]) -> dict:

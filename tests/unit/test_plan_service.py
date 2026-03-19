@@ -18,6 +18,7 @@ class TestPlanService(unittest.TestCase):
             "branch_id": "0002",
             "facia": "GO Outdoors",
             "department": "Camping",
+            "plan_name": "Camping Trial",
             "store_grade": "B",
             "allowed_space": 48,
             "used_space": 3.6,
@@ -98,8 +99,10 @@ class TestPlanService(unittest.TestCase):
             self.assertEqual(2, len(rows))
             latest_row = rows[-1]
             self.assertEqual("0002", latest_row["branch_id"])
+            self.assertEqual("Camping Trial", latest_row["plan_name"])
             self.assertEqual(3, latest_row["stand_count"])
             self.assertEqual(3.6, latest_row["used_space"])
+            self.assertTrue(latest_row["is_active"])
             self.assertEqual("ST01", latest_row["selected_stands"][0]["stand_id"])
 
     def test_bigquery_plan_rows_match_expected_schema_shape(self):
@@ -111,6 +114,7 @@ class TestPlanService(unittest.TestCase):
         )
 
         self.assertEqual("0002", header_row["branch_id"])
+        self.assertEqual("Camping Trial", header_row["plan_name"])
         self.assertEqual("draft", header_row["status"])
         self.assertEqual(2, len(department_rows))
         self.assertEqual({"Accessories", "Camping"}, {row["department_name"] for row in department_rows})
@@ -128,6 +132,7 @@ class TestPlanService(unittest.TestCase):
                     "plan_id": "plan-123",
                     "plan_department_id": "plan-dept-123",
                     "branch_id": "0002",
+                    "plan_name": "Camping Trial",
                     "branch_name": "Leeds",
                     "facia": "GO Outdoors",
                     "department_name": "Camping",
@@ -146,6 +151,7 @@ class TestPlanService(unittest.TestCase):
                     "plan_id": "plan-123",
                     "plan_department_id": "plan-dept-456",
                     "branch_id": "0002",
+                    "plan_name": "Camping Trial",
                     "branch_name": "Leeds",
                     "facia": "GO Outdoors",
                     "department_name": "Accessories",
@@ -164,6 +170,7 @@ class TestPlanService(unittest.TestCase):
         )
 
         self.assertEqual("plan-123", plan["plan_id"])
+        self.assertEqual("Camping Trial", plan["plan_name"])
         self.assertEqual("plan-123", plan["saved_plan_ref"])
         self.assertEqual(2, len(plan["departments"]))
         self.assertEqual("Accessories", plan["department"])
@@ -174,6 +181,85 @@ class TestPlanService(unittest.TestCase):
         self.assertEqual(5, plan["total_stand_units"])
         self.assertEqual(6.6, plan["total_used_space"])
         self.assertEqual(2, plan["department_count"])
+        self.assertEqual("0002|GO Outdoors", plan["plan_key"])
+        self.assertEqual("0002|GO Outdoors", plan_service.branch_saved_plan_ref(plan))
+
+    def test_list_latest_plans_keeps_only_latest_snapshot_per_branch_plan(self):
+        older = {
+            "plan_id": "plan-older",
+            "branch_id": "0002",
+            "facia": "GO Outdoors",
+            "department": "Camping",
+            "saved_at": "2026-03-18T10:00:00+00:00",
+            "updated_at": "2026-03-18T10:00:00+00:00",
+            "plan_key": "0002|GO Outdoors",
+            "saved_plan_ref": "plan-older",
+        }
+        newer = {
+            "plan_id": "plan-newer",
+            "branch_id": "0002",
+            "facia": "GO Outdoors",
+            "department": "Camping",
+            "saved_at": "2026-03-18T11:00:00+00:00",
+            "updated_at": "2026-03-18T11:00:00+00:00",
+            "plan_key": "0002|GO Outdoors",
+            "saved_plan_ref": "plan-newer",
+        }
+
+        with patch.object(plan_service, "load_plan_snapshots", return_value=[older, newer]):
+            latest = plan_service.list_latest_plans()
+
+        self.assertEqual(1, len(latest))
+        self.assertEqual("plan-newer", latest[0]["plan_id"])
+        self.assertEqual("0002|GO Outdoors", latest[0]["plan_key"])
+
+    def test_list_latest_plans_hides_logical_plans_with_inactive_latest_snapshot(self):
+        active = {
+            "plan_id": "plan-active",
+            "branch_id": "0002",
+            "facia": "GO Outdoors",
+            "department": "Camping",
+            "saved_at": "2026-03-18T10:00:00+00:00",
+            "updated_at": "2026-03-18T10:00:00+00:00",
+            "plan_key": "0002|GO Outdoors",
+            "saved_plan_ref": "plan-active",
+            "is_active": True,
+        }
+        deleted = {
+            "plan_id": "plan-deleted",
+            "branch_id": "0002",
+            "facia": "GO Outdoors",
+            "department": "Camping",
+            "saved_at": "2026-03-18T11:00:00+00:00",
+            "updated_at": "2026-03-18T11:00:00+00:00",
+            "plan_key": "0002|GO Outdoors",
+            "saved_plan_ref": "plan-deleted",
+            "is_active": False,
+        }
+
+        with patch.object(plan_service, "load_plan_snapshots", return_value=[active, deleted]):
+            latest = plan_service.list_latest_plans()
+
+        self.assertEqual([], latest)
+
+    def test_deactivate_plan_persists_inactive_deleted_snapshot(self):
+        existing = {
+            **self.plan,
+            "plan_id": "plan-123",
+            "plan_key": "0002|GO Outdoors",
+            "saved_plan_ref": "plan-123",
+            "status": "draft",
+            "is_active": True,
+        }
+
+        with patch.object(plan_service, "get_saved_plan", return_value=existing):
+            with patch.object(plan_service, "persist_plan", side_effect=lambda plan: plan) as persist_mock:
+                deleted = plan_service.deactivate_plan("0002|GO Outdoors")
+
+        self.assertFalse(deleted["is_active"])
+        self.assertEqual("deleted", deleted["status"])
+        self.assertEqual("new-created", deleted["created_at"])
+        persist_mock.assert_called_once()
 
     def test_persist_plan_falls_back_to_csv_when_bigquery_save_fails(self):
         with tempfile.TemporaryDirectory() as temp_dir:

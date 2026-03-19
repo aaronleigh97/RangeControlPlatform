@@ -6,6 +6,7 @@ import dash_bootstrap_components as dbc
 
 from range_control_platform.services.plan_service import (
     branch_saved_plan_ref,
+    deactivate_plan,
     flatten_plan_stands,
     get_saved_plan,
     list_latest_plans,
@@ -51,20 +52,53 @@ def _hydrate_saved_plan(row, ref_data):
     hydrated["store_grade"] = hydrated.get("store_grade") or store.get("store_grade")
     hydrated["square_footage"] = hydrated.get("square_footage") or store.get("square_footage")
     hydrated["budget_2026"] = hydrated.get("budget_2026") or store.get("budget_2026")
+    hydrated["plan_name"] = hydrated.get("plan_name")
     return hydrated
 
 
 def _saved_plan_options(ref_data):
     rows = list_latest_plans()
+    return _saved_plan_options_from_rows(rows, ref_data)
+
+
+def _saved_plan_options_from_rows(rows, ref_data):
     options = []
-    for row in rows:
+    for row in rows or []:
         row = _hydrate_saved_plan(row, ref_data)
+        title = row.get("plan_name") or f"{row.get('branch_id')} | {row.get('facia')}"
         label = (
+            f"{title} | "
             f"{row.get('branch_id')} | {row.get('facia')} | "
             f"{row.get('saved_at') or row.get('updated_at') or ''}"
         )
-        options.append({"label": label, "value": row.get("saved_plan_ref") or row.get("plan_key")})
+        options.append({"label": label, "value": row.get("plan_key") or row.get("saved_plan_ref")})
     return options
+
+
+def _merge_latest_saved_plan(rows, saved_plan):
+    saved_plan = dict(saved_plan or {})
+    if not saved_plan:
+        return rows or []
+
+    saved_key = saved_plan.get("plan_key") or branch_saved_plan_ref(saved_plan)
+    merged_rows = []
+    replaced = False
+    for row in rows or []:
+        row_key = row.get("plan_key") or branch_saved_plan_ref(row)
+        if row_key == saved_key:
+            merged_rows.append(saved_plan)
+            replaced = True
+        else:
+            merged_rows.append(row)
+
+    if not replaced:
+        merged_rows.append(saved_plan)
+
+    merged_rows.sort(
+        key=lambda row: str(row.get("saved_at") or row.get("updated_at") or ""),
+        reverse=True,
+    )
+    return merged_rows
 
 
 def _find_store(ref_data, branch_id):
@@ -243,74 +277,136 @@ def _compose_plan(ref_data, draft_plan=None, departments=None):
     )
 
 
+def _default_plan_name(plan):
+    if not plan:
+        return None
+    existing_name = str(plan.get("plan_name") or "").strip()
+    if existing_name:
+        return existing_name
+    branch_id = plan.get("branch_id")
+    facia = plan.get("facia")
+    if branch_id and facia:
+        return f"{branch_id} {facia} Draft"
+    if branch_id:
+        return f"{branch_id} Draft"
+    return None
+
+
 def _plan_summary_children(plan):
     if not plan:
         return html.Div("Select a store and department to start building a plan.")
 
     totals = summarize_plan_departments(plan)
+    departments = normalize_plan_departments(plan)
+    current_department = plan.get("department") or "N/A"
 
-    return dbc.Row(
+    breakdown_table = html.Div("No departments added to the current branch draft yet.")
+    if departments:
+        breakdown_header = html.Thead(
+                    html.Tr(
+                        [
+                            html.Th("Department"),
+                            html.Th("Allowed (sqm)"),
+                            html.Th("Used (sqm)"),
+                            html.Th("Remaining (sqm)"),
+                            html.Th("Stand Units"),
+                        ]
+                    )
+        )
+        breakdown_body = html.Tbody(
+            [
+                html.Tr(
+                    [
+                        html.Td(row.get("department") or "N/A"),
+                        html.Td(_fmt_number(row.get("allowed_space"))),
+                        html.Td(_fmt_number(row.get("used_space"))),
+                        html.Td(_fmt_number(row.get("remaining_space"))),
+                        html.Td(row.get("stand_count", 0)),
+                    ]
+                )
+                for row in departments
+            ]
+        )
+        breakdown_table = dbc.Table(
+            [breakdown_header, breakdown_body],
+            bordered=False,
+            hover=True,
+            striped=True,
+            size="sm",
+        )
+
+    return html.Div(
         [
-            dbc.Col(
-                dbc.Card(
-                    dbc.CardBody(
-                        [
-                            html.H6("Store Context"),
-                            html.Div(f"Branch: {plan.get('branch_id') or 'N/A'}"),
-                            html.Div(f"Facia: {plan.get('facia') or 'N/A'}"),
-                            html.Div(f"Store grade: {plan.get('store_grade') or 'N/A'}"),
-                            html.Div(
-                                f"Square footage: {_fmt_number(plan.get('square_footage'))}"
-                            ),
-                            html.Div(
-                                f"Departments in current draft: {totals.get('department_count', 0)}"
-                            ),
-                        ]
-                    )
-                ),
-                width=6,
+            dbc.Row(
+                [
+                    dbc.Col(
+                        dbc.Card(
+                            dbc.CardBody(
+                                [
+                                    html.H6("Store Context"),
+                                    html.Div(f"Branch: {plan.get('branch_id') or 'N/A'}"),
+                                    html.Div(f"Facia: {plan.get('facia') or 'N/A'}"),
+                                    html.Div(f"Plan name: {plan.get('plan_name') or 'N/A'}"),
+                                    html.Div(f"Store grade: {plan.get('store_grade') or 'N/A'}"),
+                                    html.Div(
+                                        f"Square footage: {_fmt_number(plan.get('square_footage'))}"
+                                    ),
+                                    html.Div(
+                                        f"Departments in current draft: {totals.get('department_count', 0)}"
+                                    ),
+                                    html.Div(
+                                        f"Branch plan stand area (sqm): {_fmt_number(totals.get('total_used_space'))}"
+                                    ),
+                                    html.Div(
+                                        f"Branch plan stand units: {totals.get('total_stand_units', 0)}"
+                                    ),
+                                ]
+                            )
+                        ),
+                        width=6,
+                    ),
+                    dbc.Col(
+                        dbc.Card(
+                            dbc.CardBody(
+                                [
+                                    html.H6("Current Department"),
+                                    html.Div(f"Editing department: {current_department}"),
+                                    html.Div(
+                                        "Allowed department space (sqm): "
+                                        f"{_fmt_number(plan.get('allowed_space'))}"
+                                    ),
+                                    html.Div(
+                                        f"Used stand area (sqm): {_fmt_number(plan.get('used_space'))}"
+                                    ),
+                                    html.Div(
+                                        "Remaining department space (sqm): "
+                                        f"{_fmt_number(plan.get('remaining_space'))}"
+                                    ),
+                                    html.Div(
+                                        f"Selected stand units: {plan.get('stand_count', 0)}"
+                                    ),
+                                    html.Small(
+                                        "Department space allowance is derived from the store grade "
+                                        "and department allocation rules."
+                                    ),
+                                ]
+                            )
+                        ),
+                        width=6,
+                    ),
+                ],
+                className="g-2",
             ),
-            dbc.Col(
-                dbc.Card(
-                    dbc.CardBody(
-                        [
-                            html.H6("Space Summary"),
-                            html.Div(
-                                "Allowed department allocation: "
-                                f"{_fmt_number(plan.get('allowed_space'))}"
-                            ),
-                            html.Div(
-                                f"Used stand area (sqm): {_fmt_number(plan.get('used_space'))}"
-                            ),
-                            html.Div(
-                                "Remaining planning headroom: "
-                                f"{_fmt_number(plan.get('remaining_space'))}"
-                            ),
-                            html.Div(
-                                f"Selected stand units: {plan.get('stand_count', 0)}"
-                            ),
-                            html.Div(
-                                f"Branch plan stand area (sqm): {_fmt_number(totals.get('total_used_space'))}"
-                            ),
-                            html.Div(
-                                f"Branch plan stand units: {totals.get('total_stand_units', 0)}"
-                            ),
-                            html.Small(
-                                "Department allowance is derived from store grade and "
-                                "allocation rules, not directly from total store square footage."
-                            ),
-                            html.Br(),
-                            html.Small(
-                                "Current app assumption: stand sqm is compared directly against "
-                                "the department allowance until the business confirms the final conversion rule."
-                            ),
-                        ]
-                    )
-                ),
-                width=6,
+            html.Hr(),
+            dbc.Card(
+                dbc.CardBody(
+                    [
+                        html.H6("Department Breakdown"),
+                        breakdown_table,
+                    ]
+                )
             ),
-        ],
-        className="g-2",
+        ]
     )
 
 
@@ -369,22 +465,83 @@ def register_plan_callbacks(app):
     @app.callback(
         Output("saved-plan-dd", "options"),
         Input("ref-data-store", "data"),
-        Input("plan-store", "data"),
     )
-    def populate_saved_plan_list(ref_data, _plan):
+    def populate_saved_plan_list(ref_data):
         return _saved_plan_options(ref_data)
 
     @app.callback(
         Output("plan-load-btn", "disabled"),
+        Output("plan-delete-btn", "disabled"),
         Input("saved-plan-dd", "value"),
     )
-    def toggle_load_button(selected_plan_key):
-        return not bool(selected_plan_key)
+    def toggle_saved_plan_actions(selected_plan_key):
+        disabled = not bool(selected_plan_key)
+        return disabled, disabled
+
+    @app.callback(
+        Output("saved-plan-dd", "options", allow_duplicate=True),
+        Output("saved-plan-dd", "value", allow_duplicate=True),
+        Output("plan-store", "data", allow_duplicate=True),
+        Output("plan-draft-store", "data", allow_duplicate=True),
+        Output("plan-departments-store", "data", allow_duplicate=True),
+        Output("plan-name-input", "value", allow_duplicate=True),
+        Output("facia-dd", "value", allow_duplicate=True),
+        Output("branch-dd", "value", allow_duplicate=True),
+        Output("dept-dd", "value", allow_duplicate=True),
+        Output("plan-status", "children", allow_duplicate=True),
+        Input("plan-delete-btn", "n_clicks"),
+        State("saved-plan-dd", "value"),
+        State("ref-data-store", "data"),
+        prevent_initial_call=True,
+    )
+    def delete_selected_plan(_n_clicks, selected_plan_key, ref_data):
+        if not selected_plan_key:
+            return (
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+            )
+
+        try:
+            deleted_plan = deactivate_plan(selected_plan_key)
+        except Exception as exc:
+            status = html.Div(
+                f"Plan delete failed: {exc}",
+                style={"color": "crimson"},
+            )
+            return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, status
+
+        status = html.Div(
+            dbc.Alert(
+                [
+                    html.Strong("Plan deleted from the active snapshot list."),
+                    html.Div(
+                        f"Branch: {deleted_plan.get('branch_id')} | Facia: {deleted_plan.get('facia')}"
+                    ),
+                    html.Small(
+                        "A new inactive snapshot was saved. Historical snapshots remain in storage."
+                    ),
+                ],
+                color="warning",
+                dismissable=True,
+                className="mb-0",
+            )
+        )
+        refreshed_options = _saved_plan_options(ref_data)
+        return refreshed_options, None, None, None, [], None, None, None, None, status
 
     @app.callback(
         Output("facia-dd", "value", allow_duplicate=True),
         Output("branch-dd", "value", allow_duplicate=True),
         Output("dept-dd", "value", allow_duplicate=True),
+        Output("plan-name-input", "value", allow_duplicate=True),
         Output("plan-draft-store", "data", allow_duplicate=True),
         Output("plan-departments-store", "data", allow_duplicate=True),
         Output("plan-store", "data", allow_duplicate=True),
@@ -396,7 +553,7 @@ def register_plan_callbacks(app):
     )
     def load_selected_plan(_n_clicks, selected_plan_key, ref_data):
         if not selected_plan_key:
-            return no_update, no_update, no_update, no_update, no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update
 
         row = get_saved_plan(selected_plan_key)
         if not row:
@@ -404,12 +561,13 @@ def register_plan_callbacks(app):
                 "Selected plan could not be found in the available plan storage.",
                 style={"color": "crimson"},
             )
-            return no_update, no_update, no_update, no_update, no_update, no_update, status
+            return no_update, no_update, no_update, no_update, no_update, no_update, no_update, status
 
         row = _hydrate_saved_plan(row, ref_data)
         departments = row.get("departments", [])
 
         draft_plan = {
+            "plan_name": row.get("plan_name"),
             "branch_id": row.get("branch_id"),
             "facia": row.get("facia"),
             "department": row.get("department"),
@@ -421,25 +579,33 @@ def register_plan_callbacks(app):
         plan = _compose_plan(ref_data, draft_plan, departments)
 
         status = html.Div(
-            [
-                html.Strong(
-                    f"Plan loaded from {row.get('storage_backend', 'saved')} storage."
-                ),
-                html.Div(
-                    f"Branch: {plan['branch_id']} | Facia: {plan['facia']}"
-                ),
-                html.Div(
-                    f"Current department context: {plan['department']} | "
-                    f"Departments in snapshot: {len(normalize_plan_departments(plan))}"
-                ),
-                html.Small(f"Loaded snapshot timestamp: {row.get('saved_at') or 'N/A'}"),
-            ]
+            dbc.Alert(
+                [
+                    html.Strong(
+                        f"Plan loaded from {row.get('storage_backend', 'saved')} storage."
+                    ),
+                    html.Div(
+                        f"Plan name: {plan.get('plan_name') or 'N/A'}"
+                    ),
+                    html.Div(
+                        f"Branch: {plan['branch_id']} | Facia: {plan['facia']}"
+                    ),
+                    html.Div(
+                        f"Departments in snapshot: {len(normalize_plan_departments(plan))}"
+                    ),
+                    html.Small(f"Loaded snapshot timestamp: {row.get('saved_at') or 'N/A'}"),
+                ],
+                color="success",
+                dismissable=True,
+                className="mb-0",
+            )
         )
 
         return (
             plan["facia"],
             plan["branch_id"],
             plan["department"],
+            plan.get("plan_name"),
             draft_plan,
             departments,
             plan,
@@ -590,6 +756,7 @@ def register_plan_callbacks(app):
     @app.callback(
         Output("plan-draft-store", "data"),
         Input("ref-data-store", "data"),
+        Input("plan-name-input", "value"),
         Input("facia-dd", "value"),
         Input("branch-dd", "value"),
         Input("dept-dd", "value"),
@@ -597,7 +764,7 @@ def register_plan_callbacks(app):
         State("plan-departments-store", "data"),
         prevent_initial_call=True,
     )
-    def sync_plan_context(ref_data, facia, branch_id, department, existing_plan, departments):
+    def sync_plan_context(ref_data, plan_name, facia, branch_id, department, existing_plan, departments):
         if not ref_data:
             return existing_plan
 
@@ -612,7 +779,10 @@ def register_plan_callbacks(app):
             effective_facia,
             effective_branch,
             department,
-            existing_plan,
+            {
+                **(existing_plan or {}),
+                "plan_name": plan_name or (existing_plan or {}).get("plan_name"),
+            },
         )
         same_branch = (
             (existing_plan or {}).get("branch_id") == effective_branch
@@ -621,6 +791,7 @@ def register_plan_callbacks(app):
         kept_departments = departments if same_branch else []
         return {
             **plan,
+            "plan_name": plan_name or plan.get("plan_name"),
             "departments": kept_departments or [],
         }
 
@@ -848,16 +1019,26 @@ def register_plan_callbacks(app):
     @app.callback(
         Output("plan-store", "data"),
         Output("plan-status", "children"),
+        Output("saved-plan-dd", "options", allow_duplicate=True),
         Output("saved-plan-dd", "value"),
         Input("plan-save-btn", "n_clicks"),
         State("plan-draft-store", "data"),
         State("plan-departments-store", "data"),
         State("plan-store", "data"),
+        State("saved-plan-dd", "options"),
+        State("ref-data-store", "data"),
         prevent_initial_call=True,
     )
-    def save_plan(n_clicks, draft_plan, departments, existing_saved_plan):
+    def save_plan(
+        n_clicks,
+        draft_plan,
+        departments,
+        existing_saved_plan,
+        existing_saved_plan_options,
+        ref_data,
+    ):
         if not n_clicks:
-            return no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update
 
         missing = [
             name
@@ -872,14 +1053,14 @@ def register_plan_callbacks(app):
             return existing_saved_plan, html.Div(
                 f"Missing required fields: {', '.join(missing)}",
                 style={"color": "crimson"},
-            ), no_update
+            ), no_update, no_update
 
         department_rows = normalize_plan_departments({"departments": departments or []})
         if not any(row.get("selected_stands") for row in department_rows):
             return existing_saved_plan, html.Div(
                 "Add at least one stand before saving the plan.",
                 style={"color": "crimson"},
-            ), no_update
+            ), no_update, no_update
 
         now = datetime.now(timezone.utc).isoformat()
         created_at = (
@@ -890,6 +1071,7 @@ def register_plan_callbacks(app):
 
         plan = {
             **draft_plan,
+            "plan_name": _default_plan_name(draft_plan),
             "departments": department_rows,
             "created_at": created_at,
             "updated_at": now,
@@ -918,11 +1100,11 @@ def register_plan_callbacks(app):
 
         status_children = [
             html.Strong("Plan saved."),
+            html.Div(f"Plan name: {plan.get('plan_name') or 'N/A'}"),
             html.Div(
                 f"Branch: {plan['branch_id']} | Facia: {plan['facia']}"
             ),
             html.Div(
-                f"Current department context: {plan.get('department') or 'N/A'} | "
                 f"Departments in snapshot: {len(normalize_plan_departments(plan))}"
             ),
             html.Small(f"Last updated: {plan['updated_at']}"),
@@ -932,5 +1114,14 @@ def register_plan_callbacks(app):
             status_children.append(storage_note)
 
         saved_plan_key = branch_saved_plan_ref(plan)
-        status = html.Div(status_children)
-        return plan, status, saved_plan_key
+        merged_options = _saved_plan_options_from_rows(
+            _merge_latest_saved_plan(list_latest_plans(), plan),
+            ref_data,
+        )
+        status = dbc.Alert(
+            status_children,
+            color="success",
+            dismissable=True,
+            className="mb-0",
+        )
+        return plan, status, merged_options, saved_plan_key
