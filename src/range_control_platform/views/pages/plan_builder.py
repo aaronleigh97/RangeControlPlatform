@@ -8,14 +8,14 @@ def layout():
             [
                 html.H3("Plan Builder"),
                 html.P(
-                    "Build a department plan from the BigQuery-backed store, allocation, and stand-library data."
+                    "Build a branch plan from the BigQuery-backed store, allocation, and stand-library data."
                 ),
 
                 dbc.Row(
                     [
                         dbc.Col(
                             [
-                                dbc.Label("Saved Plans (local CSV)"),
+                                dbc.Label("Saved Plan Snapshots"),
                                 dcc.Dropdown(
                                     id="saved-plan-dd",
                                     placeholder="Select a saved plan to load",
@@ -146,6 +146,11 @@ def layout():
 
                 html.H5("Selected Stands"),
                 html.Div(id="selected-stands-table"),
+
+                html.Hr(),
+
+                html.H5("Draft Debug"),
+                html.Pre(id="plan-draft-debug", style={"whiteSpace": "pre-wrap", "fontSize": "12px"}),
 
                 html.Hr(),
 

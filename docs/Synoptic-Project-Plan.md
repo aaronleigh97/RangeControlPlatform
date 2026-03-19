@@ -14,15 +14,15 @@ This file turns the synoptic requirements into an execution order that can be us
 - [x] Expanded local plan snapshots so saved plans now include selected stands and derived space metrics
 
 ### In progress
-- [ ] Update plan persistence so the next real version can save to `plans` and `plan_stands`
+- [ ] Correct the plan model so one branch plan can contain multiple departments, then persist it to BigQuery
 
 ### Blockers
 - Need business confirmation on whether department `allowed_linear_meterage` can be compared directly with stand `sqm`, or whether a conversion rule is required
 
 ### Next actions
-1. Persist saved plans to BigQuery `plans` and `plan_stands`
-2. Add stand removal/editing controls inside the builder rather than clear-and-rebuild only
-3. Start moving reporting and admin views away from legacy stand-count assumptions
+1. Correct the BigQuery plan schema to `plans` -> `plan_departments` -> `plan_stands`
+2. Refactor the in-app plan model from a single-department snapshot to a branch plan with department rows
+3. Update validation and summaries to show branch-level and department-level views
 
 ### Files touched
 - `src/range_control_platform/controllers/plan_controller.py`
@@ -33,12 +33,16 @@ This file turns the synoptic requirements into an execution order that can be us
 - `src/range_control_platform/views/layout.py`
 - `src/range_control_platform/data/seed.py`
 - `src/range_control_platform/views/pages/admin.py`
+- `docs/BigQuery-Core-Reference-Schema.md`
+- `docs/Branch-Plan-Model-Correction-2026-03-18.md`
 
 ### Notes for next Codex session
 - The plan builder now creates a draft plan from store -> department -> stand library selections and saves snapshots with `selected_stands`, `used_space`, and `allowed_space`.
 - Validation now compares saved plan stand-space usage against `department_grade_allocations` for the store's fixed grade.
 - Current validation still assumes `allowed_linear_meterage` can be compared directly with stand `sqm`; keep this assumption visible until the business confirms it.
 - Existing legacy CSV snapshots are schema-migrated on save so new snapshot rows can be appended safely.
+- A design correction has now been identified: the current saved-plan model behaves like a single department snapshot, but the real workflow needs one branch plan containing multiple departments.
+- The next implementation step should correct the schema and in-app model before adding more persistence or UI behavior on top of the current single-department structure.
 
 ## Daily Update - 2026-03-17
 
@@ -91,9 +95,9 @@ This file turns the synoptic requirements into an execution order that can be us
 
 ### Partially complete
 - [ ] Plan creation is only partial.
-Current state: store, department, and stand-library selections can be saved with used/allowed space, but period/category/SKU planning is not implemented.
+Current state: the app can save a department-level stand snapshot, but the plan model still needs to be corrected so one branch plan can contain multiple departments.
 - [ ] Validation is only partial.
-Current state: department space vs selected stand space is validated; budget, category SKU allocation, stand capacity, and override-aware validation are missing.
+Current state: one selected department can be validated against its allowance; the full branch-level multi-department model, budget, category SKU allocation, stand capacity, and override-aware validation are missing.
 - [ ] Admin is only partial.
 Current state: admin page only displays seed reference data and does not manage configuration.
 - [ ] Overrides are only partial.
@@ -154,14 +158,16 @@ Current status:
 Goal: move from a stand-count demo to an actual planning workflow.
 
 1. Add branch and planning period selection.
-2. Add category selection within department.
-3. Add stand selection by category.
-4. Add product PLU/SKU selection for each stand.
-5. Persist plan composition, not just summary counts.
-6. Handle stand removal and SKU reassignment/removal rules.
+2. Correct the plan model so one branch plan can contain multiple departments.
+3. Add category selection within department.
+4. Add stand selection by category.
+5. Add product PLU/SKU selection for each stand.
+6. Persist plan composition, not just summary counts.
+7. Handle stand removal and SKU reassignment/removal rules.
 
 Definition of done:
 - [ ] A user can create a plan for a branch and period.
+- [ ] A user can retain multiple departments inside one branch plan.
 - [ ] A user can add allowed stands.
 - [ ] A user can assign SKUs to stands.
 - [ ] Plan state survives save/load.

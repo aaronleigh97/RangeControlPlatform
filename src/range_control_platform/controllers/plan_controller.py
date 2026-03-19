@@ -1,16 +1,19 @@
 from datetime import datetime, timezone
+import json
 
-from dash import Input, Output, State, ctx, html, no_update
+from dash import ALL, Input, Output, State, ctx, html, no_update
 import dash_bootstrap_components as dbc
 
 from range_control_platform.services.plan_service import (
-    compute_stand_count,
-    compute_used_space,
-    get_latest_plan_by_key,
-    list_latest_plans_from_csv,
-    make_plan_key,
+    branch_saved_plan_ref,
+    flatten_plan_stands,
+    get_saved_plan,
+    list_latest_plans,
     normalize_selected_stands,
-    persist_plan_snapshot_to_csv,
+    normalize_department_plan,
+    normalize_plan_departments,
+    persist_plan,
+    summarize_plan_departments,
 )
 
 
@@ -40,16 +43,27 @@ def _fmt_number(value):
     return f"{number:.2f}"
 
 
-def _saved_plan_options():
-    rows = list_latest_plans_from_csv()
+def _hydrate_saved_plan(row, ref_data):
+    store = _find_store(ref_data, row.get("branch_id")) or {}
+    hydrated = dict(row)
+    hydrated["facia"] = hydrated.get("facia") or store.get("fascia")
+    hydrated["branch_name"] = hydrated.get("branch_name") or store.get("branch_name")
+    hydrated["store_grade"] = hydrated.get("store_grade") or store.get("store_grade")
+    hydrated["square_footage"] = hydrated.get("square_footage") or store.get("square_footage")
+    hydrated["budget_2026"] = hydrated.get("budget_2026") or store.get("budget_2026")
+    return hydrated
+
+
+def _saved_plan_options(ref_data):
+    rows = list_latest_plans()
     options = []
     for row in rows:
+        row = _hydrate_saved_plan(row, ref_data)
         label = (
-            f"{row.get('branch_id')} | {row.get('facia')} | {row.get('department')} | "
-            f"Used {_fmt_number(row.get('used_space'))} / Allowed {_fmt_number(row.get('allowed_space'))} | "
+            f"{row.get('branch_id')} | {row.get('facia')} | "
             f"{row.get('saved_at') or row.get('updated_at') or ''}"
         )
-        options.append({"label": label, "value": row.get("plan_key")})
+        options.append({"label": label, "value": row.get("saved_plan_ref") or row.get("plan_key")})
     return options
 
 
@@ -99,44 +113,141 @@ def _find_stand(ref_data, stand_id):
     )
 
 
-def _build_plan_context(ref_data, facia, branch_id, department, existing_plan=None):
-    existing_plan = existing_plan or {}
-    same_context = (
-        existing_plan.get("branch_id") == branch_id
-        and existing_plan.get("facia") == facia
-        and existing_plan.get("department") == department
-    )
-    selected_stands = normalize_selected_stands(
-        existing_plan.get("selected_stands") if same_context else []
-    )
+def _get_department_plan(plan, department):
+    if not plan or not department:
+        return None
+    for department_plan in normalize_plan_departments(plan):
+        if department_plan.get("department") == department:
+            return department_plan
+    return None
 
+
+def _replace_department_plan(plan, department_plan):
+    if not department_plan:
+        return normalize_plan_departments(plan)
+
+    updated_departments = []
+    replaced = False
+    for existing in normalize_plan_departments(plan):
+        if existing.get("department") == department_plan.get("department"):
+            updated_departments.append(normalize_department_plan(department_plan))
+            replaced = True
+        else:
+            updated_departments.append(existing)
+
+    if not replaced:
+        updated_departments.append(normalize_department_plan(department_plan))
+
+    updated_departments = [row for row in updated_departments if row]
+    updated_departments.sort(key=lambda row: str(row.get("department") or ""))
+    return updated_departments
+
+
+def _decorate_plan(plan, ref_data):
+    plan = dict(plan or {})
+    branch_id = plan.get("branch_id")
     store = _find_store(ref_data, branch_id) or {}
-    store_grade = store.get("store_grade") or store.get("grade")
-    allowed_space = _find_department_allocation(ref_data, department, store_grade)
-    used_space = compute_used_space(selected_stands)
-    remaining_space = None if allowed_space is None else round(allowed_space - used_space, 2)
+    store_grade = store.get("store_grade") or store.get("grade") or plan.get("store_grade")
+    current_department = plan.get("department")
+    departments = normalize_plan_departments(plan)
+    current_department_plan = _get_department_plan({"departments": departments}, current_department)
+
+    allowed_space = None
+    selected_stands = []
+    plan_department_id = None
+    if current_department_plan:
+        allowed_space = current_department_plan.get("allowed_space")
+        selected_stands = current_department_plan.get("selected_stands") or []
+        plan_department_id = current_department_plan.get("plan_department_id")
+    elif current_department:
+        allowed_space = _find_department_allocation(ref_data, current_department, store_grade)
+
+    used_space = normalize_department_plan(
+        {
+            "department": current_department,
+            "allowed_space": allowed_space,
+            "selected_stands": selected_stands,
+        }
+    ) or {
+        "used_space": 0.0,
+        "remaining_space": (
+            None if allowed_space is None else round(float(allowed_space) - 0.0, 2)
+        ),
+        "stand_count": 0,
+    }
+    totals = summarize_plan_departments({"departments": departments})
 
     return {
-        **existing_plan,
-        "branch_id": branch_id,
-        "branch_name": store.get("branch_name") or existing_plan.get("branch_name"),
-        "facia": facia or store.get("fascia"),
-        "department": department,
+        **plan,
+        "branch_name": store.get("branch_name") or plan.get("branch_name"),
+        "facia": plan.get("facia") or store.get("fascia"),
         "store_grade": store_grade,
-        "square_footage": store.get("square_footage"),
-        "budget_2026": store.get("budget_2026"),
+        "square_footage": store.get("square_footage") or plan.get("square_footage"),
+        "budget_2026": store.get("budget_2026") or plan.get("budget_2026"),
+        "departments": departments,
+        "plan_department_id": plan_department_id,
         "allowed_space": allowed_space,
         "allowed_space_unit": "linear_meter",
-        "used_space": used_space,
-        "remaining_space": remaining_space,
-        "stand_count": compute_stand_count(selected_stands),
+        "used_space": used_space.get("used_space", 0.0),
+        "remaining_space": used_space.get("remaining_space"),
+        "stand_count": used_space.get("stand_count", 0),
         "selected_stands": selected_stands,
+        "department_count": totals.get("department_count", 0),
+        "total_used_space": totals.get("total_used_space", 0.0),
+        "total_stand_units": totals.get("total_stand_units", 0),
     }
+
+
+def _build_plan_context(ref_data, facia, branch_id, department, existing_plan=None):
+    existing_plan = existing_plan or {}
+    effective_facia = facia or existing_plan.get("facia")
+    effective_branch_id = branch_id or existing_plan.get("branch_id")
+    effective_department = department if department is not None else existing_plan.get("department")
+
+    same_branch = (
+        existing_plan.get("branch_id") == effective_branch_id
+        and (existing_plan.get("facia") == effective_facia or not effective_facia)
+    )
+    departments = normalize_plan_departments(existing_plan if same_branch else None)
+    department_context_changed = existing_plan.get("department") != effective_department
+    return _decorate_plan(
+        {
+            **existing_plan,
+            "branch_id": effective_branch_id,
+            "facia": effective_facia,
+            "department": effective_department,
+            "departments": departments,
+            "plan_department_id": (
+                None if department_context_changed else existing_plan.get("plan_department_id")
+            ),
+            "allowed_space": None if department_context_changed else existing_plan.get("allowed_space"),
+            "used_space": 0.0 if department_context_changed else existing_plan.get("used_space"),
+            "remaining_space": (
+                None if department_context_changed else existing_plan.get("remaining_space")
+            ),
+            "stand_count": 0 if department_context_changed else existing_plan.get("stand_count"),
+            "selected_stands": [] if department_context_changed else existing_plan.get("selected_stands"),
+        },
+        ref_data,
+    )
+
+
+def _compose_plan(ref_data, draft_plan=None, departments=None):
+    draft_plan = dict(draft_plan or {})
+    return _decorate_plan(
+        {
+            **draft_plan,
+            "departments": departments or [],
+        },
+        ref_data,
+    )
 
 
 def _plan_summary_children(plan):
     if not plan:
         return html.Div("Select a store and department to start building a plan.")
+
+    totals = summarize_plan_departments(plan)
 
     return dbc.Row(
         [
@@ -147,10 +258,12 @@ def _plan_summary_children(plan):
                             html.H6("Store Context"),
                             html.Div(f"Branch: {plan.get('branch_id') or 'N/A'}"),
                             html.Div(f"Facia: {plan.get('facia') or 'N/A'}"),
-                            html.Div(f"Department: {plan.get('department') or 'N/A'}"),
                             html.Div(f"Store grade: {plan.get('store_grade') or 'N/A'}"),
                             html.Div(
                                 f"Square footage: {_fmt_number(plan.get('square_footage'))}"
+                            ),
+                            html.Div(
+                                f"Departments in current draft: {totals.get('department_count', 0)}"
                             ),
                         ]
                     )
@@ -163,18 +276,33 @@ def _plan_summary_children(plan):
                         [
                             html.H6("Space Summary"),
                             html.Div(
-                                "Allowed department space: "
+                                "Allowed department allocation: "
                                 f"{_fmt_number(plan.get('allowed_space'))}"
                             ),
                             html.Div(
-                                f"Used stand space: {_fmt_number(plan.get('used_space'))}"
+                                f"Used stand area (sqm): {_fmt_number(plan.get('used_space'))}"
                             ),
                             html.Div(
-                                "Remaining space: "
+                                "Remaining planning headroom: "
                                 f"{_fmt_number(plan.get('remaining_space'))}"
                             ),
                             html.Div(
-                                f"Selected stand quantity: {plan.get('stand_count', 0)}"
+                                f"Selected stand units: {plan.get('stand_count', 0)}"
+                            ),
+                            html.Div(
+                                f"Branch plan stand area (sqm): {_fmt_number(totals.get('total_used_space'))}"
+                            ),
+                            html.Div(
+                                f"Branch plan stand units: {totals.get('total_stand_units', 0)}"
+                            ),
+                            html.Small(
+                                "Department allowance is derived from store grade and "
+                                "allocation rules, not directly from total store square footage."
+                            ),
+                            html.Br(),
+                            html.Small(
+                                "Current app assumption: stand sqm is compared directly against "
+                                "the department allowance until the business confirms the final conversion rule."
                             ),
                         ]
                     )
@@ -187,19 +315,21 @@ def _plan_summary_children(plan):
 
 
 def _stand_table(plan):
-    selected_stands = (plan or {}).get("selected_stands") or []
+    selected_stands = flatten_plan_stands(plan)
     if not selected_stands:
         return html.Div("No stands added yet.")
 
     header = html.Thead(
         html.Tr(
             [
+                html.Th("Department"),
                 html.Th("Stand ID"),
                 html.Th("Stand"),
                 html.Th("Type"),
                 html.Th("Sqm"),
                 html.Th("Qty"),
                 html.Th("Total Sqm"),
+                html.Th("Remove"),
             ]
         )
     )
@@ -207,12 +337,26 @@ def _stand_table(plan):
         [
             html.Tr(
                 [
+                    html.Td(stand.get("department") or "N/A"),
                     html.Td(stand.get("stand_id")),
                     html.Td(stand.get("stand_name")),
                     html.Td(stand.get("stand_type") or ""),
                     html.Td(_fmt_number(stand.get("sqm"))),
                     html.Td(stand.get("quantity")),
                     html.Td(_fmt_number(stand.get("total_sqm"))),
+                    html.Td(
+                        dbc.Button(
+                            "Remove",
+                            id={
+                                "type": "remove-stand-btn",
+                                "department": stand.get("department"),
+                                "stand_id": stand.get("stand_id"),
+                            },
+                            color="link",
+                            size="sm",
+                            className="p-0",
+                        )
+                    ),
                 ]
             )
             for stand in selected_stands
@@ -227,8 +371,8 @@ def register_plan_callbacks(app):
         Input("ref-data-store", "data"),
         Input("plan-store", "data"),
     )
-    def populate_saved_plan_list(_ref_data, _plan):
-        return _saved_plan_options()
+    def populate_saved_plan_list(ref_data, _plan):
+        return _saved_plan_options(ref_data)
 
     @app.callback(
         Output("plan-load-btn", "disabled"),
@@ -242,46 +386,51 @@ def register_plan_callbacks(app):
         Output("branch-dd", "value", allow_duplicate=True),
         Output("dept-dd", "value", allow_duplicate=True),
         Output("plan-draft-store", "data", allow_duplicate=True),
+        Output("plan-departments-store", "data", allow_duplicate=True),
         Output("plan-store", "data", allow_duplicate=True),
         Output("plan-status", "children", allow_duplicate=True),
         Input("plan-load-btn", "n_clicks"),
         State("saved-plan-dd", "value"),
+        State("ref-data-store", "data"),
         prevent_initial_call=True,
     )
-    def load_selected_plan(_n_clicks, selected_plan_key):
+    def load_selected_plan(_n_clicks, selected_plan_key, ref_data):
         if not selected_plan_key:
-            return no_update, no_update, no_update, no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update, no_update, no_update, no_update
 
-        row = get_latest_plan_by_key(selected_plan_key)
+        row = get_saved_plan(selected_plan_key)
         if not row:
             status = html.Div(
-                "Selected plan could not be found in local CSV snapshots.",
+                "Selected plan could not be found in the available plan storage.",
                 style={"color": "crimson"},
             )
-            return no_update, no_update, no_update, no_update, no_update, status
+            return no_update, no_update, no_update, no_update, no_update, no_update, status
 
-        plan = {
+        row = _hydrate_saved_plan(row, ref_data)
+        departments = row.get("departments", [])
+
+        draft_plan = {
             "branch_id": row.get("branch_id"),
             "facia": row.get("facia"),
             "department": row.get("department"),
-            "store_grade": row.get("store_grade"),
-            "allowed_space": row.get("allowed_space"),
-            "allowed_space_unit": "linear_meter",
-            "used_space": row.get("used_space"),
-            "remaining_space": row.get("remaining_space"),
-            "stand_count": row.get("stand_count", 0),
-            "selected_stands": row.get("selected_stands", []),
             "created_at": row.get("created_at"),
             "updated_at": row.get("updated_at") or row.get("saved_at"),
+            "plan_id": row.get("plan_id"),
+            "status": row.get("status"),
         }
+        plan = _compose_plan(ref_data, draft_plan, departments)
 
         status = html.Div(
             [
-                html.Strong("Plan loaded from local CSV snapshot."),
+                html.Strong(
+                    f"Plan loaded from {row.get('storage_backend', 'saved')} storage."
+                ),
                 html.Div(
-                    f"Branch: {plan['branch_id']} | Facia: {plan['facia']} | "
-                    f"Dept: {plan['department']} | "
-                    f"Used {_fmt_number(plan['used_space'])} / Allowed {_fmt_number(plan['allowed_space'])}"
+                    f"Branch: {plan['branch_id']} | Facia: {plan['facia']}"
+                ),
+                html.Div(
+                    f"Current department context: {plan['department']} | "
+                    f"Departments in snapshot: {len(normalize_plan_departments(plan))}"
                 ),
                 html.Small(f"Loaded snapshot timestamp: {row.get('saved_at') or 'N/A'}"),
             ]
@@ -291,10 +440,62 @@ def register_plan_callbacks(app):
             plan["facia"],
             plan["branch_id"],
             plan["department"],
-            plan,
+            draft_plan,
+            departments,
             plan,
             status,
         )
+
+    @app.callback(
+        Output("facia-dd", "value", allow_duplicate=True),
+        Output("branch-dd", "value", allow_duplicate=True),
+        Output("dept-dd", "value", allow_duplicate=True),
+        Input("plan-store", "data"),
+        Input("plan-draft-store", "data"),
+        Input("branch-dd", "options"),
+        Input("dept-dd", "options"),
+        State("facia-dd", "value"),
+        State("branch-dd", "value"),
+        State("dept-dd", "value"),
+        prevent_initial_call=True,
+    )
+    def sync_loaded_plan_into_dropdowns(
+        saved_plan,
+        draft_plan,
+        branch_options,
+        dept_options,
+        current_facia,
+        current_branch,
+        current_department,
+    ):
+        source_plan = draft_plan or saved_plan
+        if not source_plan:
+            return no_update, no_update, no_update
+
+        target_facia = source_plan.get("facia")
+        target_branch = source_plan.get("branch_id")
+        target_department = source_plan.get("department")
+
+        next_facia = no_update
+        next_branch = no_update
+        next_department = no_update
+
+        if target_facia and not current_facia:
+            next_facia = target_facia
+
+        branch_values = {opt.get("value") for opt in (branch_options or [])}
+        if target_branch and target_branch in branch_values and not current_branch:
+            next_branch = target_branch
+
+        dept_values = {opt.get("value") for opt in (dept_options or [])}
+        if (
+            target_department
+            and target_department in dept_values
+            and not current_department
+        ):
+            next_department = target_department
+
+        return next_facia, next_branch, next_department
 
     @app.callback(
         Output("facia-dd", "options"),
@@ -348,7 +549,16 @@ def register_plan_callbacks(app):
                 }
             )
         else:
-            department_names = ref_data.get("departments", [])
+            department_names = []
+
+        if not department_names:
+            department_names = sorted(
+                {
+                    row.get("department_name")
+                    for row in ref_data.get("department_grade_allocations", [])
+                    if row.get("department_name")
+                }
+            ) or ref_data.get("departments", [])
 
         depts = [{"label": d, "value": d} for d in department_names]
         return depts, False
@@ -384,15 +594,54 @@ def register_plan_callbacks(app):
         Input("branch-dd", "value"),
         Input("dept-dd", "value"),
         State("plan-draft-store", "data"),
+        State("plan-departments-store", "data"),
+        prevent_initial_call=True,
     )
-    def sync_plan_context(ref_data, facia, branch_id, department, existing_plan):
+    def sync_plan_context(ref_data, facia, branch_id, department, existing_plan, departments):
         if not ref_data:
             return existing_plan
 
-        if not any([facia, branch_id, department]):
+        effective_facia = facia or (existing_plan or {}).get("facia")
+        effective_branch = branch_id or (existing_plan or {}).get("branch_id")
+
+        if not any([effective_facia, effective_branch, department, (existing_plan or {}).get("department")]):
             return None
 
-        return _build_plan_context(ref_data, facia, branch_id, department, existing_plan)
+        plan = _build_plan_context(
+            ref_data,
+            effective_facia,
+            effective_branch,
+            department,
+            existing_plan,
+        )
+        same_branch = (
+            (existing_plan or {}).get("branch_id") == effective_branch
+            and ((existing_plan or {}).get("facia") == effective_facia or not effective_facia)
+        )
+        kept_departments = departments if same_branch else []
+        return {
+            **plan,
+            "departments": kept_departments or [],
+        }
+
+    @app.callback(
+        Output("plan-departments-store", "data", allow_duplicate=True),
+        Input("facia-dd", "value"),
+        Input("branch-dd", "value"),
+        State("plan-draft-store", "data"),
+        prevent_initial_call=True,
+    )
+    def clear_department_rows_on_branch_change(selected_facia, selected_branch, existing_plan):
+        if not existing_plan:
+            return no_update
+
+        existing_facia = existing_plan.get("facia")
+        existing_branch = existing_plan.get("branch_id")
+        if selected_facia and selected_branch and (
+            selected_facia != existing_facia or selected_branch != existing_branch
+        ):
+            return []
+        return no_update
 
     @app.callback(
         Output("branch-dd", "value"),
@@ -443,40 +692,92 @@ def register_plan_callbacks(app):
         return quantity_disabled, add_disabled, clear_disabled
 
     @app.callback(
+        Output("plan-departments-store", "data", allow_duplicate=True),
         Output("plan-draft-store", "data", allow_duplicate=True),
         Output("stand-library-dd", "value"),
         Input("add-stand-btn", "n_clicks"),
         Input("clear-stands-btn", "n_clicks"),
+        Input({"type": "remove-stand-btn", "department": ALL, "stand_id": ALL}, "n_clicks"),
         State("stand-library-dd", "value"),
         State("stand-qty", "value"),
+        State("dept-dd", "value"),
         State("plan-draft-store", "data"),
+        State("plan-departments-store", "data"),
         State("ref-data-store", "data"),
         prevent_initial_call=True,
     )
-    def update_selected_stands(_add_clicks, _clear_clicks, stand_id, quantity, plan, ref_data):
+    def update_selected_stands(
+        _add_clicks,
+        _clear_clicks,
+        _remove_clicks,
+        stand_id,
+        quantity,
+        selected_department,
+        plan,
+        departments,
+        ref_data,
+    ):
         if not plan:
-            return no_update, no_update
+            return no_update, no_update, no_update
 
         trigger = ctx.triggered_id
-        selected_stands = normalize_selected_stands(plan.get("selected_stands"))
+        current_department = selected_department or plan.get("department")
+        department_plan_state = {"departments": departments or []}
+        current_department_plan = _get_department_plan(department_plan_state, current_department) or {}
+        selected_stands = normalize_selected_stands(current_department_plan.get("selected_stands"))
+        allowed_space = current_department_plan.get("allowed_space")
+        if allowed_space is None:
+            allowed_space = _find_department_allocation(
+                ref_data,
+                current_department,
+                plan.get("store_grade"),
+            )
 
         if trigger == "clear-stands-btn":
-            updated_plan = {
-                **plan,
-                "selected_stands": [],
-                "stand_count": 0,
-                "used_space": 0.0,
-                "remaining_space": (
-                    None
-                    if plan.get("allowed_space") is None
-                    else round(float(plan.get("allowed_space")) - 0.0, 2)
-                ),
-            }
-            return updated_plan, None
+            updated_departments = _replace_department_plan(
+                department_plan_state,
+                {
+                    **current_department_plan,
+                    "department": current_department,
+                    "store_grade": plan.get("store_grade"),
+                    "allowed_space": allowed_space,
+                    "selected_stands": [],
+                },
+            )
+            updated_plan = _compose_plan(
+                ref_data,
+                {**plan, "department": current_department},
+                updated_departments,
+            )
+            return updated_departments, updated_plan, None
+
+        if isinstance(trigger, dict) and trigger.get("type") == "remove-stand-btn":
+            if not any(click_count for click_count in (_remove_clicks or []) if click_count):
+                return no_update, no_update, no_update
+            department_name = trigger.get("department")
+            stand_to_remove = trigger.get("stand_id")
+            target_department = _get_department_plan(department_plan_state, department_name) or {}
+            filtered_stands = [
+                row
+                for row in normalize_selected_stands(target_department.get("selected_stands"))
+                if row.get("stand_id") != stand_to_remove
+            ]
+            updated_departments = _replace_department_plan(
+                department_plan_state,
+                {
+                    **target_department,
+                    "department": department_name,
+                    "store_grade": target_department.get("store_grade") or plan.get("store_grade"),
+                    "allowed_space": target_department.get("allowed_space"),
+                    "selected_stands": filtered_stands,
+                },
+            )
+            updated_plan = _compose_plan(ref_data, plan, updated_departments)
+            return updated_departments, updated_plan, no_update
 
         stand = _find_stand(ref_data, stand_id)
         if not stand or not quantity or quantity <= 0:
-            return no_update, no_update
+            return no_update, no_update, no_update
 
         quantity = int(quantity)
         existing_by_id = {row.get("stand_id"): dict(row) for row in selected_stands}
@@ -490,41 +791,58 @@ def register_plan_callbacks(app):
             "quantity": new_quantity,
         }
         normalized = normalize_selected_stands(list(existing_by_id.values()))
-        used_space = compute_used_space(normalized)
-        allowed_space = plan.get("allowed_space")
-
-        updated_plan = {
-            **plan,
-            "selected_stands": normalized,
-            "stand_count": compute_stand_count(normalized),
-            "used_space": used_space,
-            "remaining_space": (
-                None
-                if allowed_space is None
-                else round(float(allowed_space) - used_space, 2)
-            ),
-        }
-        return updated_plan, None
+        updated_departments = _replace_department_plan(
+            department_plan_state,
+            {
+                **current_department_plan,
+                "department": current_department,
+                "store_grade": plan.get("store_grade"),
+                "allowed_space": allowed_space,
+                "selected_stands": normalized,
+            },
+        )
+        updated_plan = _compose_plan(
+            ref_data,
+            {**plan, "department": current_department},
+            updated_departments,
+        )
+        return updated_departments, updated_plan, None
 
     @app.callback(
         Output("plan-summary", "children"),
         Output("selected-stands-table", "children"),
+        Output("plan-draft-debug", "children"),
         Input("plan-draft-store", "data"),
+        Input("plan-departments-store", "data"),
+        State("ref-data-store", "data"),
     )
-    def render_plan_builder(plan):
-        return _plan_summary_children(plan), _stand_table(plan)
+    def render_plan_builder(plan, departments, ref_data):
+        plan = _compose_plan(ref_data, plan, departments)
+        debug = {
+            "branch_id": (plan or {}).get("branch_id"),
+            "facia": (plan or {}).get("facia"),
+            "department": (plan or {}).get("department"),
+            "departments": normalize_plan_departments({"departments": departments or []}),
+        }
+        return (
+            _plan_summary_children(plan),
+            _stand_table(plan),
+            json.dumps(debug, indent=2),
+        )
 
     @app.callback(
         Output("plan-save-btn", "disabled"),
         Input("plan-draft-store", "data"),
+        Input("plan-departments-store", "data"),
     )
-    def toggle_save_button(plan):
+    def toggle_save_button(plan, departments):
+        department_rows = normalize_plan_departments({"departments": departments or []})
         return not bool(
             plan
             and plan.get("branch_id")
             and plan.get("facia")
-            and plan.get("department")
-            and plan.get("selected_stands")
+            and department_rows
+            and any(row.get("selected_stands") for row in department_rows)
         )
 
     @app.callback(
@@ -533,10 +851,11 @@ def register_plan_callbacks(app):
         Output("saved-plan-dd", "value"),
         Input("plan-save-btn", "n_clicks"),
         State("plan-draft-store", "data"),
+        State("plan-departments-store", "data"),
         State("plan-store", "data"),
         prevent_initial_call=True,
     )
-    def save_plan(n_clicks, draft_plan, existing_saved_plan):
+    def save_plan(n_clicks, draft_plan, departments, existing_saved_plan):
         if not n_clicks:
             return no_update, no_update, no_update
 
@@ -545,7 +864,6 @@ def register_plan_callbacks(app):
             for name, val in [
                 ("Branch", (draft_plan or {}).get("branch_id")),
                 ("Facia", (draft_plan or {}).get("facia")),
-                ("Department", (draft_plan or {}).get("department")),
             ]
             if not val
         ]
@@ -556,7 +874,8 @@ def register_plan_callbacks(app):
                 style={"color": "crimson"},
             ), no_update
 
-        if not (draft_plan or {}).get("selected_stands"):
+        department_rows = normalize_plan_departments({"departments": departments or []})
+        if not any(row.get("selected_stands") for row in department_rows):
             return existing_saved_plan, html.Div(
                 "Add at least one stand before saving the plan.",
                 style={"color": "crimson"},
@@ -571,33 +890,47 @@ def register_plan_callbacks(app):
 
         plan = {
             **draft_plan,
+            "departments": department_rows,
             "created_at": created_at,
             "updated_at": now,
         }
+        plan = _compose_plan(None, plan, department_rows)
 
-        csv_note = None
+        storage_note = None
         try:
-            csv_path = persist_plan_snapshot_to_csv(plan)
-            csv_note = html.Small(f"Saved to CSV: {csv_path}")
+            persisted_plan = persist_plan(plan)
+            plan = {**plan, **persisted_plan}
+            backend = plan.get("storage_backend", "unknown")
+            if backend == "bigquery":
+                storage_note = html.Small(f"Saved to BigQuery plan_id: {plan.get('plan_id')}")
+            elif backend == "csv-fallback":
+                storage_note = html.Small(
+                    f"BigQuery save failed, fell back to CSV: {plan.get('storage_location')}",
+                    style={"color": "darkorange"},
+                )
+            else:
+                storage_note = html.Small(f"Saved to CSV: {plan.get('storage_location')}")
         except Exception as exc:
-            csv_note = html.Small(
-                f"CSV save failed: {exc}",
+            storage_note = html.Small(
+                f"Plan save failed: {exc}",
                 style={"color": "crimson"},
             )
 
         status_children = [
             html.Strong("Plan saved."),
             html.Div(
-                f"Branch: {plan['branch_id']} | Facia: {plan['facia']} | "
-                f"Dept: {plan['department']} | "
-                f"Used {_fmt_number(plan['used_space'])} / Allowed {_fmt_number(plan['allowed_space'])}"
+                f"Branch: {plan['branch_id']} | Facia: {plan['facia']}"
+            ),
+            html.Div(
+                f"Current department context: {plan.get('department') or 'N/A'} | "
+                f"Departments in snapshot: {len(normalize_plan_departments(plan))}"
             ),
             html.Small(f"Last updated: {plan['updated_at']}"),
         ]
-        if csv_note is not None:
+        if storage_note is not None:
             status_children.append(html.Br())
-            status_children.append(csv_note)
+            status_children.append(storage_note)
 
-        saved_plan_key = make_plan_key(plan)
+        saved_plan_key = branch_saved_plan_ref(plan)
         status = html.Div(status_children)
         return plan, status, saved_plan_key

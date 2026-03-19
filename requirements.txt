@@ -3,3 +3,4 @@ dash-bootstrap-components==1.6.0
 dash-ag-grid==31.2.0
 python-dotenv==1.0.1
 pydantic==2.7.4
+git+https://github.com/jdplc-merch/merch-app-deploy-frameworks.git@v5.0.4#egg=deploy_frameworks

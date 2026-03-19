@@ -10,6 +10,14 @@ from range_control_platform.controllers.validation_controller import register_va
 from range_control_platform.data.repositories import build_reference_data_repository
 from range_control_platform.data.seed import seed_reference_data
 from range_control_platform.views.layout import app_shell
+from range_control_platform.views.pages import (
+    admin,
+    home,
+    overrides,
+    plan_builder,
+    reports,
+    validation,
+)
 
 
 def create_app():
@@ -28,7 +36,7 @@ def create_app():
     app = Dash(
         __name__,
         external_stylesheets=[dbc.themes.BOOTSTRAP],
-        suppress_callback_exceptions=True,
+        suppress_callback_exceptions=False,
     )
     app.layout = app_shell(
         html.Div(
@@ -36,6 +44,22 @@ def create_app():
                 dcc.Location(id="url"),
                 dcc.Store(id="ref-data-error-store", data=initial_load_error),
                 html.Div(id="page-content"),
+            ]
+        ),
+        initial_ref_data=initial_ref_data,
+    )
+    app.validation_layout = app_shell(
+        html.Div(
+            [
+                dcc.Location(id="url"),
+                dcc.Store(id="ref-data-error-store", data=initial_load_error),
+                html.Div(id="page-content"),
+                home.layout(),
+                plan_builder.layout(),
+                validation.layout(),
+                overrides.layout(),
+                reports.layout(),
+                admin.layout(),
             ]
         ),
         initial_ref_data=initial_ref_data,

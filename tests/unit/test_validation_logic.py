@@ -1,9 +1,11 @@
 import sys
+import types
 import unittest
 from pathlib import Path
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+sys.modules.setdefault("dotenv", types.SimpleNamespace(load_dotenv=lambda: None))
 
 from range_control_platform.services.validation_logic import build_validation_result
 
@@ -39,7 +41,7 @@ class TestValidationLogic(unittest.TestCase):
 
         self.assertEqual("PASS", result["validation_status"])
         self.assertEqual("success", result["color"])
-        self.assertIn("Remaining space: 6.00.", result["details"])
+        self.assertIn("Camping: remaining headroom 6.00.", result["details"])
 
     def test_build_validation_result_fails_when_used_space_exceeds_allowance(self):
         plan = {
@@ -54,19 +56,31 @@ class TestValidationLogic(unittest.TestCase):
 
         self.assertEqual("FAIL", result["validation_status"])
         self.assertEqual("danger", result["color"])
-        self.assertIn("Over by 2.00.", result["details"])
+        self.assertIn("Camping: over by 2.00.", result["details"])
 
     def test_build_validation_result_reports_missing_allocation(self):
         plan = {
             "branch_id": "0001",
             "department": "Footwear",
             "selected_stands": [],
+            "departments": [
+                {
+                    "department": "Footwear",
+                    "allowed_space": None,
+                    "selected_stands": [],
+                    "plan_department_id": "dept-1",
+                }
+            ],
         }
 
         result = build_validation_result(plan, self.ref_data, click_ts=303)
 
-        self.assertEqual("No department allocation found for this store grade.", result["message"])
+        self.assertEqual("FAIL: One or more department allowances were exceeded.", result["message"])
         self.assertEqual("danger", result["color"])
+        self.assertIn(
+            "No department allocation found for Footwear at grade B.",
+            result["details"],
+        )
 
 
 if __name__ == "__main__":

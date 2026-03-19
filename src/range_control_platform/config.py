@@ -13,5 +13,9 @@ class Settings:
     # future: BigQuery project/datasets (safe placeholders)
     BQ_PROJECT: str = os.getenv("BQ_PROJECT", "")
     BQ_DATASET: str = os.getenv("BQ_DATASET", "")
+    BQ_BRANCH_SOURCE_TABLE: str = os.getenv(
+        "BQ_BRANCH_SOURCE_TABLE",
+        "jd-gcp-prd-dl-structured-np.PDS_STAGE.ORSTBRCH",
+    )
 
 settings = Settings()

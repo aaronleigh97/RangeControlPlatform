@@ -46,6 +46,7 @@ def app_shell(page_container, initial_ref_data=None):
             # Global State Stores
             dcc.Store(id="ref-data-store", data=initial_ref_data),
             dcc.Store(id="plan-draft-store"),
+            dcc.Store(id="plan-departments-store"),
             dcc.Store(id="plan-store"),
             dcc.Store(id="validation-store"),
             dcc.Store(id="audit-store"),

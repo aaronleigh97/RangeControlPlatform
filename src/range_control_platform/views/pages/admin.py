@@ -19,6 +19,7 @@ def layout():
                                 dcc.Dropdown(
                                     id="admin-section-dd",
                                     options=[
+                                        {"label": "Meta", "value": "_meta"},
                                         {"label": "Facias", "value": "facias"},
                                         {"label": "Grades", "value": "grades"},
                                         {"label": "Departments", "value": "departments"},
@@ -32,7 +33,7 @@ def layout():
                                         },
                                         {"label": "Stand Library", "value": "stand_library"},
                                     ],
-                                    value="facias",
+                                    value="_meta",
                                     clearable=False,
                                 ),
                             ],

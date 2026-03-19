@@ -10,6 +10,10 @@ def register_admin_callbacks(app):
         if not ref_data:
             return html.Div("No reference data loaded yet.")
 
+        meta = ref_data.get("_meta", {})
+        if section == "_meta":
+            return html.Pre(str(meta))
+
         data = ref_data.get(section)
 
         # Pretty rendering for dict/list/other

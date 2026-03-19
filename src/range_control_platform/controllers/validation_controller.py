@@ -2,7 +2,9 @@ from dash import Input, Output, State, html, no_update
 
 from range_control_platform.services.plan_service import (
     compute_stand_count,
+    normalize_plan_departments,
     persist_validation_result_to_csv,
+    summarize_plan_departments,
 )
 from range_control_platform.services.validation_logic import build_validation_result
 
@@ -28,16 +30,20 @@ def register_validation_callbacks(app):
         if not plan:
             return html.Div("No saved plan available yet.")
 
+        totals = summarize_plan_departments(plan)
+
         return html.Ul(
             [
                 html.Li(f"Branch ID: {plan.get('branch_id')}"),
                 html.Li(f"Facia: {plan.get('facia')}"),
-                html.Li(f"Department: {plan.get('department')}"),
+                html.Li(f"Current department context: {plan.get('department') or 'N/A'}"),
                 html.Li(f"Store grade: {plan.get('store_grade') or 'N/A'}"),
                 html.Li(f"Allowed space: {_fmt_number(plan.get('allowed_space'))}"),
                 html.Li(f"Used space: {_fmt_number(plan.get('used_space'))}"),
                 html.Li(f"Remaining space: {_fmt_number(plan.get('remaining_space'))}"),
                 html.Li(f"Stand quantity: {compute_stand_count(plan.get('selected_stands'))}"),
+                html.Li(f"Departments in plan: {len(normalize_plan_departments(plan))}"),
+                html.Li(f"Branch plan stand area: {_fmt_number(totals.get('total_used_space'))}"),
                 html.Li(f"Updated: {plan.get('updated_at')}"),
             ]
         )

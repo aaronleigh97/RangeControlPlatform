@@ -3,9 +3,9 @@ import dash_bootstrap_components as dbc
 from dash import ctx
 
 from range_control_platform.services.plan_service import (
-    get_plan_csv_path,
+    export_plan_snapshots_to_csv,
     load_latest_validation_status_by_plan_key,
-    load_plan_snapshots_from_csv,
+    load_plan_snapshots,
     summarize_plan_snapshots,
 )
 
@@ -134,10 +134,10 @@ def register_report_callbacks(app):
         triggered = ctx.triggered_id
 
         if triggered == "report-summary-btn":
-            rows = load_plan_snapshots_from_csv()
+            rows = load_plan_snapshots()
             if not rows:
                 return (
-                    "No local plan snapshots found yet. Create/Update a plan first.",
+                    "No saved plan snapshots found yet. Save a plan first.",
                     "warning",
                     html.Div("Nothing to summarize yet."),
                     no_update,
@@ -179,14 +179,15 @@ def register_report_callbacks(app):
             )
 
         if triggered == "report-csv-btn":
-            csv_path = get_plan_csv_path()
-            if not csv_path.exists():
+            rows = load_plan_snapshots()
+            if not rows:
                 return (
-                    "No CSV export file exists yet. Create/Update a plan first.",
+                    "No saved plan data exists yet. Save a plan first.",
                     "warning",
                     no_update,
                     no_update,
                 )
+            csv_path = export_plan_snapshots_to_csv(rows)
 
             return (
                 f"CSV export ready: {csv_path.name}",

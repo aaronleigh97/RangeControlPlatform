@@ -1,10 +1,17 @@
 import csv
 import json
+import math
 from collections import Counter
 from pathlib import Path
+from uuid import uuid4
 
+from range_control_platform.config import settings
+
+
+DEFAULT_RANGE_CONTROL_DATASET = "jds-gcp-dev-dl-odm-analytics.RangeControlPlatform"
 
 CSV_HEADERS = [
+    "plan_id",
     "branch_id",
     "facia",
     "department",
@@ -27,6 +34,7 @@ VALIDATION_CSV_HEADERS = [
     "validation_status",
     "validated_at",
 ]
+
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parents[3]
@@ -52,6 +60,56 @@ def _safe_float(value, default=0.0):
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _plan_dataset() -> str:
+    if settings.BQ_PROJECT and settings.BQ_DATASET:
+        return f"{settings.BQ_PROJECT}.{settings.BQ_DATASET}"
+    if settings.BQ_DATASET and "." in settings.BQ_DATASET:
+        return settings.BQ_DATASET
+    return DEFAULT_RANGE_CONTROL_DATASET
+
+
+def _use_bigquery_plan_storage() -> bool:
+    return settings.ENV == "jd"
+
+
+def _load_bigquery_modules():
+    try:
+        from deploy_frameworks.bigquery import bigquery
+    except ImportError as exc:
+        raise RuntimeError(
+            "deploy_frameworks.bigquery is not installed or unavailable. "
+            "Plan persistence cannot use BigQuery."
+        ) from exc
+    return bigquery
+
+
+def _sql_string(value) -> str:
+    if value is None:
+        return "NULL"
+    escaped = str(value).replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{escaped}'"
+
+
+def _sql_int(value) -> str:
+    if value is None:
+        return "NULL"
+    return str(_safe_int(value, 0))
+
+
+def _sql_timestamp(value) -> str:
+    if not value:
+        return "CURRENT_TIMESTAMP()"
+    return f"TIMESTAMP({_sql_string(value)})"
+
+
+def _clean_missing(value):
+    if value is None:
+        return None
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    return value
 
 
 def compute_stand_count(selected_stands: list[dict] | None) -> int:
@@ -104,6 +162,94 @@ def deserialize_selected_stands(value) -> list[dict]:
     return normalize_selected_stands(parsed)
 
 
+def normalize_department_plan(department_plan: dict | None) -> dict | None:
+    if not department_plan or not department_plan.get("department"):
+        return None
+
+    selected_stands = normalize_selected_stands(department_plan.get("selected_stands"))
+    allowed_space_raw = department_plan.get("allowed_space")
+    allowed_space = None if allowed_space_raw is None else round(_safe_float(allowed_space_raw), 2)
+    used_space = compute_used_space(selected_stands)
+    remaining_space = None if allowed_space is None else round(allowed_space - used_space, 2)
+
+    return {
+        "plan_department_id": department_plan.get("plan_department_id"),
+        "department": department_plan.get("department"),
+        "store_grade": department_plan.get("store_grade"),
+        "allowed_space": allowed_space,
+        "used_space": used_space,
+        "remaining_space": remaining_space,
+        "stand_count": compute_stand_count(selected_stands),
+        "selected_stands": selected_stands,
+    }
+
+
+def normalize_plan_departments(plan: dict | None) -> list[dict]:
+    departments = []
+    for department_plan in (plan or {}).get("departments") or []:
+        normalized = normalize_department_plan(department_plan)
+        if normalized:
+            departments.append(normalized)
+
+    if departments:
+        departments.sort(key=lambda row: str(row.get("department") or ""))
+        return departments
+
+    fallback = normalize_department_plan(
+        {
+            "plan_department_id": (plan or {}).get("plan_department_id"),
+            "department": (plan or {}).get("department"),
+            "store_grade": (plan or {}).get("store_grade"),
+            "allowed_space": (plan or {}).get("allowed_space"),
+            "selected_stands": (plan or {}).get("selected_stands"),
+        }
+    )
+    if fallback:
+        departments = [fallback]
+
+    departments.sort(key=lambda row: str(row.get("department") or ""))
+    return departments
+
+
+def flatten_plan_stands(plan: dict | None) -> list[dict]:
+    rows = []
+    for department_plan in normalize_plan_departments(plan):
+        department_name = department_plan.get("department")
+        for stand in department_plan.get("selected_stands") or []:
+            rows.append(
+                {
+                    **stand,
+                    "department": department_name,
+                    "plan_department_id": department_plan.get("plan_department_id"),
+                }
+            )
+    rows.sort(
+        key=lambda row: (
+            str(row.get("department") or ""),
+            str(row.get("stand_id") or ""),
+        )
+    )
+    return rows
+
+
+def summarize_plan_departments(plan: dict | None) -> dict:
+    departments = normalize_plan_departments(plan)
+    return {
+        "department_count": len(departments),
+        "total_stand_units": sum(department.get("stand_count", 0) for department in departments),
+        "total_used_space": round(
+            sum(_safe_float(department.get("used_space"), 0.0) for department in departments),
+            2,
+        ),
+    }
+
+
+def branch_saved_plan_ref(plan: dict | None) -> str | None:
+    if not plan:
+        return None
+    return plan.get("plan_id") or plan.get("saved_plan_ref") or plan.get("plan_key")
+
+
 def make_plan_key(row: dict) -> str:
     return "|".join([
         str(row.get("branch_id") or ""),
@@ -133,6 +279,7 @@ def _ensure_plan_csv_schema(csv_path: Path) -> None:
         for existing_row in existing_rows:
             writer.writerow(
                 {
+                    "plan_id": existing_row.get("plan_id") or "",
                     "branch_id": existing_row.get("branch_id"),
                     "facia": existing_row.get("facia"),
                     "department": existing_row.get("department"),
@@ -152,15 +299,9 @@ def _ensure_plan_csv_schema(csv_path: Path) -> None:
             )
 
 
-def persist_plan_snapshot_to_csv(plan: dict) -> Path:
-    """
-    Append a snapshot row for the current plan to a CSV file.
-    """
-    csv_path = get_plan_csv_path()
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
-    _ensure_plan_csv_schema(csv_path)
-
-    row = {
+def _csv_row_from_plan(plan: dict) -> dict:
+    return {
+        "plan_id": plan.get("plan_id") or "",
         "branch_id": plan.get("branch_id"),
         "facia": plan.get("facia"),
         "department": plan.get("department"),
@@ -175,6 +316,31 @@ def persist_plan_snapshot_to_csv(plan: dict) -> Path:
         "saved_at": plan.get("updated_at"),
     }
 
+
+def _plan_from_csv_row(row: dict) -> dict:
+    clean = dict(row)
+    clean["plan_id"] = clean.get("plan_id") or None
+    clean["plan_key"] = make_plan_key(clean)
+    clean["stand_count"] = _safe_int(clean.get("stand_count"), 0)
+    clean["allowed_space"] = _safe_float(clean.get("allowed_space"), 0.0)
+    clean["used_space"] = _safe_float(clean.get("used_space"), 0.0)
+    clean["remaining_space"] = _safe_float(clean.get("remaining_space"), 0.0)
+    clean["selected_stands"] = deserialize_selected_stands(clean.get("selected_stands_json"))
+    if clean["selected_stands"]:
+        clean["stand_count"] = compute_stand_count(clean["selected_stands"])
+        clean["used_space"] = compute_used_space(clean["selected_stands"])
+        clean["remaining_space"] = round(clean["allowed_space"] - clean["used_space"], 2)
+    clean["saved_plan_ref"] = clean.get("plan_id") or clean["plan_key"]
+    clean["storage_backend"] = "csv"
+    return clean
+
+
+def persist_plan_snapshot_to_csv(plan: dict) -> Path:
+    csv_path = get_plan_csv_path()
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_plan_csv_schema(csv_path)
+
+    row = _csv_row_from_plan(plan)
     file_exists = csv_path.exists()
     with csv_path.open("a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_HEADERS)
@@ -192,24 +358,364 @@ def load_plan_snapshots_from_csv() -> list[dict]:
 
     with csv_path.open("r", newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
-        rows = []
-        for row in reader:
-            clean = dict(row)
-            clean["plan_key"] = make_plan_key(clean)
-            clean["stand_count"] = _safe_int(clean.get("stand_count"), 0)
-            clean["allowed_space"] = _safe_float(clean.get("allowed_space"), 0.0)
-            clean["used_space"] = _safe_float(clean.get("used_space"), 0.0)
-            clean["remaining_space"] = _safe_float(clean.get("remaining_space"), 0.0)
-            clean["selected_stands"] = deserialize_selected_stands(clean.get("selected_stands_json"))
-            if clean["selected_stands"]:
-                clean["stand_count"] = compute_stand_count(clean["selected_stands"])
-                clean["used_space"] = compute_used_space(clean["selected_stands"])
-                clean["remaining_space"] = round(
-                    clean["allowed_space"] - clean["used_space"],
-                    2,
-                )
-            rows.append(clean)
-        return rows
+        return [_plan_from_csv_row(row) for row in reader]
+
+
+def _bigquery_plan_header_row(plan: dict) -> dict:
+    return {
+        "plan_id": str(uuid4()),
+        "branch_id": str(plan.get("branch_id") or ""),
+        "created_by": plan.get("created_by"),
+        "created_at": plan.get("updated_at") or plan.get("created_at"),
+        "status": plan.get("status") or "draft",
+    }
+
+
+def _bigquery_plan_department_rows(plan_id: str, plan: dict) -> list[dict]:
+    rows = []
+    for department_plan in normalize_plan_departments(plan):
+        rows.append(
+            {
+                "plan_department_id": str(uuid4()),
+                "plan_id": plan_id,
+                "department_name": str(department_plan.get("department") or ""),
+                "store_grade": department_plan.get("store_grade"),
+                "allowed_space": (
+                    "NULL"
+                    if department_plan.get("allowed_space") is None
+                    else round(_safe_float(department_plan.get("allowed_space")), 2)
+                ),
+                "selected_stands": department_plan.get("selected_stands") or [],
+            }
+        )
+    return rows
+
+
+def _bigquery_plan_stand_rows(
+    plan_department_id: str,
+    selected_stands: list[dict] | None,
+) -> list[dict]:
+    rows = []
+    for stand in normalize_selected_stands(selected_stands):
+        rows.append(
+            {
+                "plan_stand_id": f"{plan_department_id}-{stand.get('stand_id')}",
+                "plan_department_id": plan_department_id,
+                "stand_id": stand.get("stand_id"),
+                "quantity": _safe_int(stand.get("quantity"), 0),
+            }
+        )
+    return rows
+
+
+def _plan_from_bigquery_rows(rows: list[dict]) -> dict | None:
+    if not rows:
+        return None
+
+    first = {key: _clean_missing(value) for key, value in rows[0].items()}
+    departments_by_id = {}
+    for row in rows:
+        row = {key: _clean_missing(value) for key, value in row.items()}
+        plan_department_id = row.get("plan_department_id")
+        department_name = row.get("department_name")
+        if not plan_department_id or not department_name:
+            continue
+        department = departments_by_id.setdefault(
+            plan_department_id,
+            {
+                "plan_department_id": plan_department_id,
+                "department": department_name,
+                "store_grade": row.get("persisted_store_grade") or row.get("store_grade"),
+                "allowed_space": _clean_missing(row.get("allowed_space")),
+                "selected_stands": [],
+            },
+        )
+        if not row.get("stand_id"):
+            continue
+        quantity = _safe_int(row.get("quantity"), 0)
+        sqm = _safe_float(row.get("sqm"), 0.0)
+        if quantity <= 0:
+            continue
+        department["selected_stands"].append(
+            {
+                "stand_id": row.get("stand_id"),
+                "stand_name": row.get("stand_name"),
+                "stand_type": row.get("stand_type"),
+                "sqm": round(sqm, 2),
+                "quantity": quantity,
+                "total_sqm": round(quantity * sqm, 2),
+            }
+        )
+
+    departments = [
+        normalized
+        for normalized in (
+            normalize_department_plan(department) for department in departments_by_id.values()
+        )
+        if normalized
+    ]
+    if not departments:
+        return None
+    departments.sort(key=lambda department: str(department.get("department") or ""))
+    current_department = departments[0]
+    totals = summarize_plan_departments({"departments": departments})
+
+    plan = {
+        "plan_id": first.get("plan_id"),
+        "branch_id": first.get("branch_id"),
+        "branch_name": first.get("branch_name"),
+        "facia": first.get("facia"),
+        "department": current_department.get("department"),
+        "store_grade": first.get("store_grade") or current_department.get("store_grade"),
+        "square_footage": first.get("square_footage"),
+        "created_by": first.get("created_by"),
+        "created_at": first.get("created_at"),
+        "updated_at": first.get("created_at"),
+        "saved_at": first.get("created_at"),
+        "status": first.get("status"),
+        "plan_department_id": current_department.get("plan_department_id"),
+        "allowed_space": current_department.get("allowed_space"),
+        "allowed_space_unit": "linear_meter",
+        "used_space": current_department.get("used_space"),
+        "remaining_space": current_department.get("remaining_space"),
+        "stand_count": current_department.get("stand_count"),
+        "selected_stands": current_department.get("selected_stands"),
+        "departments": departments,
+        "total_used_space": totals["total_used_space"],
+        "total_stand_units": totals["total_stand_units"],
+        "department_count": totals["department_count"],
+        "plan_key": make_plan_key(
+            {
+                "branch_id": first.get("branch_id"),
+                "facia": first.get("facia"),
+                "department": current_department.get("department"),
+            }
+        ),
+        "saved_plan_ref": first.get("plan_id"),
+        "storage_backend": "bigquery",
+    }
+    return plan
+
+
+def _load_bigquery_plan_rows(saved_plan_ref: str | None = None) -> list[dict]:
+    bigquery = _load_bigquery_modules()
+    dataset = _plan_dataset()
+    filter_clause = ""
+    if saved_plan_ref:
+        escaped_saved_plan_ref = str(saved_plan_ref).replace("'", "\\'")
+        filter_clause = f"WHERE p.plan_id = '{escaped_saved_plan_ref}'"
+
+    query = f"""
+    SELECT
+      p.plan_id,
+      p.branch_id,
+      p.created_by,
+      p.created_at,
+      p.status,
+      pd.plan_department_id,
+      pd.department_name,
+      pd.store_grade AS persisted_store_grade,
+      pd.allowed_space,
+      s.branch_name,
+      s.fascia,
+      s.store_grade,
+      s.square_footage,
+      ps.plan_stand_id,
+      ps.stand_id,
+      ps.quantity,
+      sl.stand_name,
+      sl.stand_type,
+      sl.sqm
+    FROM `{dataset}.plans` p
+    INNER JOIN `{dataset}.plan_departments` pd
+      ON p.plan_id = pd.plan_id
+    LEFT JOIN `{dataset}.stores` s
+      ON p.branch_id = s.branch_id
+    LEFT JOIN `{dataset}.plan_stands` ps
+      ON pd.plan_department_id = ps.plan_department_id
+    LEFT JOIN `{dataset}.stand_library` sl
+      ON ps.stand_id = sl.stand_id
+    {filter_clause}
+    ORDER BY p.created_at DESC, ps.plan_stand_id
+    """
+    return bigquery(query).to_dict("records")
+
+
+def persist_plan_to_bigquery(plan: dict) -> dict:
+    bigquery = _load_bigquery_modules()
+    plan_header_row = _bigquery_plan_header_row(plan)
+    plan_id = plan_header_row["plan_id"]
+    department_rows = _bigquery_plan_department_rows(plan_id, plan)
+    dataset = _plan_dataset()
+    plan_insert_sql = f"""
+    INSERT INTO `{dataset}.plans` (
+      plan_id,
+      branch_id,
+      created_by,
+      created_at,
+      status
+    )
+    VALUES (
+      {_sql_string(plan_header_row['plan_id'])},
+      {_sql_string(plan_header_row['branch_id'])},
+      {_sql_string(plan_header_row['created_by'])},
+      {_sql_timestamp(plan_header_row['created_at'])},
+      {_sql_string(plan_header_row['status'])}
+    )
+    """
+    bigquery(plan_insert_sql)
+
+    if department_rows:
+        department_values_sql = ",\n".join(
+            [
+                "("
+                f"{_sql_string(row['plan_department_id'])}, "
+                f"{_sql_string(row['plan_id'])}, "
+                f"{_sql_string(row['department_name'])}, "
+                f"{_sql_string(row['store_grade'])}, "
+                f"{row['allowed_space']}"
+                ")"
+                for row in department_rows
+            ]
+        )
+        department_insert_sql = f"""
+        INSERT INTO `{dataset}.plan_departments` (
+          plan_department_id,
+          plan_id,
+          department_name,
+          store_grade,
+          allowed_space
+        )
+        VALUES
+        {department_values_sql}
+        """
+        bigquery(department_insert_sql)
+
+    stand_rows = []
+    for department_row in department_rows:
+        stand_rows.extend(
+            _bigquery_plan_stand_rows(
+                department_row["plan_department_id"],
+                department_row.get("selected_stands"),
+            )
+        )
+
+    if stand_rows:
+        values_sql = ",\n".join(
+            [
+                "("
+                f"{_sql_string(row['plan_stand_id'])}, "
+                f"{_sql_string(row['plan_department_id'])}, "
+                f"{_sql_string(row['stand_id'])}, "
+                f"{_sql_int(row['quantity'])}"
+                ")"
+                for row in stand_rows
+            ]
+        )
+        stand_insert_sql = f"""
+        INSERT INTO `{dataset}.plan_stands` (
+          plan_stand_id,
+          plan_department_id,
+          stand_id,
+          quantity
+        )
+        VALUES
+        {values_sql}
+        """
+        bigquery(stand_insert_sql)
+
+    return {
+        **plan,
+        "plan_id": plan_id,
+        "plan_department_id": None,
+        "created_at": plan_header_row["created_at"],
+        "updated_at": plan_header_row["created_at"],
+        "saved_at": plan_header_row["created_at"],
+        "saved_plan_ref": plan_id,
+        "storage_backend": "bigquery",
+        "status": plan_header_row["status"],
+    }
+
+
+def load_plan_snapshots_from_bigquery() -> list[dict]:
+    rows = _load_bigquery_plan_rows()
+    grouped_rows = {}
+    for row in rows:
+        grouped_rows.setdefault(row.get("plan_id"), []).append(row)
+
+    plans = []
+    for group in grouped_rows.values():
+        plan = _plan_from_bigquery_rows(group)
+        if plan:
+            plans.append(plan)
+    plans.sort(key=lambda row: row.get("saved_at") or "", reverse=True)
+    return plans
+
+
+def load_plan_snapshots() -> list[dict]:
+    if _use_bigquery_plan_storage():
+        try:
+            return load_plan_snapshots_from_bigquery()
+        except Exception:
+            return load_plan_snapshots_from_csv()
+    return load_plan_snapshots_from_csv()
+
+
+def list_latest_plans() -> list[dict]:
+    rows = load_plan_snapshots()
+    latest_by_key = {}
+    for row in rows:
+        key = row.get("saved_plan_ref") or row.get("plan_id") or row.get("plan_key") or make_plan_key(row)
+        existing = latest_by_key.get(key)
+        row_saved = row.get("saved_at") or row.get("updated_at") or ""
+        existing_saved = (existing or {}).get("saved_at") or (existing or {}).get("updated_at") or ""
+        if existing is None or row_saved >= existing_saved:
+            latest_by_key[key] = row
+
+    latest_rows = list(latest_by_key.values())
+    latest_rows.sort(key=lambda r: r.get("saved_at") or r.get("updated_at") or "", reverse=True)
+    return latest_rows
+
+
+def get_saved_plan(saved_plan_ref: str) -> dict | None:
+    if not saved_plan_ref:
+        return None
+
+    if _use_bigquery_plan_storage():
+        try:
+            plan = _plan_from_bigquery_rows(_load_bigquery_plan_rows(saved_plan_ref))
+            if plan:
+                return plan
+        except Exception:
+            pass
+
+    for row in list_latest_plans():
+        if row.get("saved_plan_ref") == saved_plan_ref or row.get("plan_key") == saved_plan_ref:
+            return row
+    return None
+
+
+def persist_plan(plan: dict) -> dict:
+    if _use_bigquery_plan_storage():
+        try:
+            return persist_plan_to_bigquery(plan)
+        except Exception as exc:
+            csv_path = persist_plan_snapshot_to_csv(plan)
+            return {
+                **plan,
+                "saved_plan_ref": make_plan_key(plan),
+                "storage_backend": "csv-fallback",
+                "storage_location": str(csv_path),
+                "storage_error": str(exc),
+            }
+
+    csv_path = persist_plan_snapshot_to_csv(plan)
+    return {
+        **plan,
+        "saved_plan_ref": make_plan_key(plan),
+        "storage_backend": "csv",
+        "storage_location": str(csv_path),
+    }
 
 
 def list_latest_plans_from_csv() -> list[dict]:
@@ -253,11 +759,8 @@ def summarize_plan_snapshots(rows: list[dict]) -> dict:
 
     facia_counts = Counter((r.get("facia") or "(blank)") for r in rows)
     department_counts = Counter((r.get("department") or "(blank)") for r in rows)
-    unique_plans = {
-        r.get("plan_key") or make_plan_key(r)
-        for r in rows
-    }
-    latest_saved_at = max((r.get("saved_at") or "") for r in rows) or None
+    unique_plans = {r.get("plan_key") or make_plan_key(r) for r in rows}
+    latest_saved_at = max((r.get("saved_at") or r.get("updated_at") or "") for r in rows) or None
 
     stand_values = []
     for row in rows:
@@ -270,7 +773,11 @@ def summarize_plan_snapshots(rows: list[dict]) -> dict:
     stand_max = max(stand_values) if stand_values else None
     stand_avg = (sum(stand_values) / len(stand_values)) if stand_values else None
 
-    recent_rows = sorted(rows, key=lambda r: r.get("saved_at") or "", reverse=True)[:10]
+    recent_rows = sorted(
+        rows,
+        key=lambda r: r.get("saved_at") or r.get("updated_at") or "",
+        reverse=True,
+    )[:10]
 
     return {
         "total_snapshots": len(rows),
@@ -283,6 +790,19 @@ def summarize_plan_snapshots(rows: list[dict]) -> dict:
         "department_counts": department_counts.most_common(),
         "recent_rows": recent_rows,
     }
+
+
+def export_plan_snapshots_to_csv(rows: list[dict], export_path: Path | None = None) -> Path:
+    export_path = export_path or (_project_root() / "data_exports" / "plans_export.csv")
+    export_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with export_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_HEADERS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(_csv_row_from_plan(row))
+
+    return export_path
 
 
 def persist_validation_result_to_csv(plan: dict, validation_status: str, validated_at: str) -> Path:

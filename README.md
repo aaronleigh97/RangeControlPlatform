@@ -12,3 +12,8 @@ Key Features
 - Support override workflows with audit visibility
 - Generate reports for review and analysis
 - Swap between local/demo data and BigQuery-backed data access
+
+Current implementation note
+
+- The app can now load facias, branches, grades, and departments from JD BigQuery-backed queries when `ENV=jd`
+- If JD BigQuery authentication is unavailable, the app falls back to local seed reference data so development can continue

@@ -1,4 +1,9 @@
-from range_control_platform.services.plan_service import compute_stand_count, compute_used_space
+from range_control_platform.services.plan_service import (
+    compute_stand_count,
+    compute_used_space,
+    normalize_plan_departments,
+    summarize_plan_departments,
+)
 
 
 def find_store(ref_data, branch_id):
@@ -45,44 +50,63 @@ def build_validation_result(plan, ref_data, click_ts):
         }
 
     grade = store.get("store_grade") or plan.get("store_grade")
-    department = plan.get("department")
-    allowed = find_department_allocation(ref_data, department, grade)
-
-    if allowed is None:
+    department_plans = normalize_plan_departments(plan)
+    if not department_plans:
         return {
-            "message": "No department allocation found for this store grade.",
+            "message": "No department plan rows found.",
+            "color": "warning",
+            "details": [],
+            "last_run_click_ts": click_ts,
+        }
+
+    details = []
+    failures = []
+    for department_plan in department_plans:
+        department = department_plan.get("department")
+        allowed = department_plan.get("allowed_space")
+        if allowed is None:
+            allowed = find_department_allocation(ref_data, department, grade)
+
+        if allowed is None:
+            failures.append(
+                f"No department allocation found for {department or 'N/A'} at grade {grade or 'N/A'}."
+            )
+            continue
+
+        selected_stands = department_plan.get("selected_stands") or []
+        planned = compute_used_space(selected_stands) or 0.0
+        remaining = round(float(allowed) - planned, 2)
+
+        details.extend(
+            [
+                f"{department}: allowance {float(allowed):.2f}, planned {planned:.2f} sqm across {compute_stand_count(selected_stands)} stand(s).",
+                "Current implementation compares department linear meterage directly with stand sqm pending business conversion guidance.",
+            ]
+        )
+
+        if planned > float(allowed):
+            failures.append(f"{department}: over by {round(planned - float(allowed), 2):.2f}.")
+        else:
+            details.append(f"{department}: remaining headroom {remaining:.2f}.")
+
+    totals = summarize_plan_departments(plan)
+    details.append(
+        f"Branch plan total stand area: {totals.get('total_used_space', 0.0):.2f} sqm across {totals.get('department_count', 0)} department(s)."
+    )
+
+    if failures:
+        return {
+            "message": "FAIL: One or more department allowances were exceeded.",
             "color": "danger",
-            "details": [
-                f"Department: {department or 'N/A'}",
-                f"Store grade: {grade or 'N/A'}",
-            ],
+            "details": details + failures,
+            "validation_status": "FAIL",
             "last_run_click_ts": click_ts,
         }
 
-    selected_stands = plan.get("selected_stands") or []
-    planned = compute_used_space(selected_stands) or 0.0
-    remaining = round(allowed - planned, 2)
-
-    details = [
-        f"Store grade {grade} allows {allowed:.2f} linear meters for {department}.",
-        f"Selected stands use {planned:.2f} sqm across {compute_stand_count(selected_stands)} stand(s).",
-        "Current implementation compares department linear meterage directly with stand sqm pending business conversion guidance.",
-    ]
-
-    if planned <= allowed:
-        return {
-            "message": "PASS: Department space is within allowance.",
-            "color": "success",
-            "details": details + [f"Remaining space: {remaining:.2f}."],
-            "validation_status": "PASS",
-            "last_run_click_ts": click_ts,
-        }
-
-    breach = round(planned - allowed, 2)
     return {
-        "message": "FAIL: Department space allowance exceeded.",
-        "color": "danger",
-        "details": details + [f"Over by {breach:.2f}."],
-        "validation_status": "FAIL",
+        "message": "PASS: All planned departments are within allowance.",
+        "color": "success",
+        "details": details,
+        "validation_status": "PASS",
         "last_run_click_ts": click_ts,
     }
