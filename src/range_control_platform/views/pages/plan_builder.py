@@ -48,6 +48,18 @@ def layout():
                             width=2,
                             className="d-flex align-items-end",
                         ),
+                        dbc.Col(
+                            dbc.Button(
+                                "Unload Current Plan",
+                                id="plan-unload-btn",
+                                color="warning",
+                                outline=True,
+                                className="w-100",
+                                disabled=True,
+                            ),
+                            width=3,
+                            className="d-flex align-items-end",
+                        ),
                     ],
                     className="g-2",
                 ),
@@ -172,11 +184,6 @@ def layout():
 
                 html.H5("Selected Stands"),
                 html.Div(id="selected-stands-table"),
-
-                html.Hr(),
-
-                html.H5("Draft Debug"),
-                html.Pre(id="plan-draft-debug", style={"whiteSpace": "pre-wrap", "fontSize": "12px"}),
 
                 html.Hr(),
 
