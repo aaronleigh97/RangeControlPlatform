@@ -128,6 +128,13 @@ def _clean_missing(value):
     return value
 
 
+def resolve_plan_is_active(plan: dict | None) -> bool:
+    status = str((plan or {}).get("status") or "").strip().lower()
+    if status == "deleted":
+        return False
+    return True
+
+
 def compute_stand_count(selected_stands: list[dict] | None) -> int:
     return sum(_safe_int(stand.get("quantity"), 0) for stand in (selected_stands or []))
 
@@ -139,24 +146,149 @@ def compute_used_space(selected_stands: list[dict] | None) -> float:
     )
 
 
+def _instance_row_id(stand: dict, row_index: int, copy_index: int) -> str:
+    stand_id = str(stand.get("stand_id") or "stand")
+    return f"legacy-{stand_id}-{row_index + 1}-{copy_index + 1}"
+
+
+def normalize_assigned_products(assigned_products: list[dict] | None) -> list[dict]:
+    normalized = []
+    seen_product_ids = set()
+    for product in assigned_products or []:
+        product_id = str(product.get("product_id") or "").strip()
+        if not product_id or product_id in seen_product_ids:
+            continue
+        seen_product_ids.add(product_id)
+        normalized.append(
+            {
+                "product_id": product_id,
+                "product_code": str(product.get("product_code") or "").strip() or None,
+                "product_name": str(product.get("product_name") or "").strip() or None,
+                "department_name": str(product.get("department_name") or "").strip() or None,
+                "range_name": str(product.get("range_name") or "").strip() or None,
+            }
+        )
+    normalized.sort(
+        key=lambda product: (
+            str(product.get("range_name") or ""),
+            str(product.get("product_name") or ""),
+            str(product.get("product_code") or ""),
+            str(product.get("product_id") or ""),
+        )
+    )
+    return normalized
+
+
+def _normalize_capacity_class(capacity_class) -> str | None:
+    normalized = str(capacity_class or "").strip().lower()
+    if normalized in {"single", "double"}:
+        return normalized
+    return None
+
+
+def compute_stand_product_capacity(arms, capacity_class, quantity=1) -> int | None:
+    normalized_type = _normalize_capacity_class(capacity_class)
+    if normalized_type is None:
+        return None
+
+    base_arms = max(_safe_int(arms, 0), 0)
+    base_capacity = base_arms + 1
+    if normalized_type == "double":
+        base_capacity *= 2
+
+    stand_quantity = max(_safe_int(quantity, 0), 0)
+    if stand_quantity <= 0:
+        return 0
+    return base_capacity * stand_quantity
+
+
+def build_stand_product_capacity_status(
+    assigned_products: list[dict] | None,
+    arms,
+    capacity_class,
+    quantity=1,
+) -> dict:
+    normalized_products = normalize_assigned_products(assigned_products)
+    assigned_count = len(normalized_products)
+    capacity = compute_stand_product_capacity(arms, capacity_class, quantity=quantity)
+
+    if capacity is None:
+        return {
+            "status": "unknown",
+            "label": "Unknown",
+            "color": "secondary",
+            "assigned_count": assigned_count,
+            "capacity": None,
+            "remaining_slots": None,
+        }
+
+    remaining_slots = capacity - assigned_count
+    if assigned_count > capacity:
+        status = "over_capacity"
+        label = "Over Capacity"
+        color = "danger"
+    elif assigned_count == capacity:
+        status = "just_right"
+        label = "Just Right"
+        color = "success"
+    else:
+        status = "underfilled"
+        label = "Underfilled"
+        color = "warning"
+
+    return {
+        "status": status,
+        "label": label,
+        "color": color,
+        "assigned_count": assigned_count,
+        "capacity": capacity,
+        "remaining_slots": remaining_slots,
+    }
+
+
 def normalize_selected_stands(selected_stands: list[dict] | None) -> list[dict]:
     normalized = []
-    for stand in selected_stands or []:
+    for row_index, stand in enumerate(selected_stands or []):
         quantity = _safe_int(stand.get("quantity"), 0)
         sqm = _safe_float(stand.get("sqm"), 0.0)
         if quantity <= 0:
             continue
-        normalized.append(
-            {
-                "stand_id": stand.get("stand_id"),
-                "stand_name": stand.get("stand_name"),
-                "stand_type": stand.get("stand_type"),
-                "sqm": round(sqm, 2),
-                "quantity": quantity,
-                "total_sqm": round(quantity * sqm, 2),
-            }
+        assigned_products = normalize_assigned_products(stand.get("assigned_products"))
+        explicit_instance_id = str(stand.get("stand_instance_id") or "").strip() or None
+        if explicit_instance_id:
+            instance_ids = [explicit_instance_id]
+        else:
+            source_instance_ids = [
+                str(value).strip()
+                for value in (stand.get("stand_instance_ids") or [])
+                if str(value).strip()
+            ]
+            if source_instance_ids:
+                instance_ids = source_instance_ids
+            else:
+                instance_ids = [_instance_row_id(stand, row_index, copy_index) for copy_index in range(quantity)]
+
+        for copy_index, stand_instance_id in enumerate(instance_ids[: max(quantity, 1)]):
+            normalized.append(
+                {
+                    "stand_instance_id": stand_instance_id,
+                    "stand_id": stand.get("stand_id"),
+                    "stand_name": stand.get("stand_name"),
+                    "stand_type": stand.get("stand_type"),
+                    "stand_height": stand.get("stand_height"),
+                    "arms": stand.get("arms"),
+                    "sqm": round(sqm, 2),
+                    "quantity": 1,
+                    "total_sqm": round(sqm, 2),
+                    "assigned_products": assigned_products if copy_index == 0 or explicit_instance_id else [],
+                }
+            )
+    normalized.sort(
+        key=lambda item: (
+            str(item.get("stand_id") or ""),
+            str(item.get("stand_instance_id") or ""),
         )
-    normalized.sort(key=lambda item: str(item.get("stand_id") or ""))
+    )
     return normalized
 
 
@@ -243,6 +375,7 @@ def flatten_plan_stands(plan: dict | None) -> list[dict]:
         key=lambda row: (
             str(row.get("department") or ""),
             str(row.get("stand_id") or ""),
+            str(row.get("stand_instance_id") or ""),
         )
     )
     return rows
@@ -266,10 +399,16 @@ def branch_saved_plan_ref(plan: dict | None) -> str | None:
     return plan.get("plan_key") or plan.get("saved_plan_ref") or plan.get("plan_id")
 
 
+def _normalized_plan_name_key(value) -> str:
+    return str(value or "").strip().lower()
+
+
 def make_plan_key(row: dict) -> str:
+    plan_name_key = _normalized_plan_name_key((row or {}).get("plan_name"))
     return "|".join([
-        str(row.get("branch_id") or ""),
-        str(row.get("facia") or ""),
+        str((row or {}).get("branch_id") or ""),
+        str((row or {}).get("facia") or ""),
+        plan_name_key,
     ])
 
 
@@ -323,7 +462,7 @@ def _csv_row_from_plan(plan: dict) -> dict:
         "facia": plan.get("facia"),
         "department": plan.get("department"),
         "plan_name": plan.get("plan_name"),
-        "is_active": _safe_bool(plan.get("is_active"), True),
+        "is_active": resolve_plan_is_active(plan),
         "store_grade": plan.get("store_grade"),
         "allowed_space": round(_safe_float(plan.get("allowed_space"), 0.0), 2),
         "used_space": round(_safe_float(plan.get("used_space"), 0.0), 2),
@@ -390,7 +529,7 @@ def _bigquery_plan_header_row(plan: dict) -> dict:
         "created_by": plan.get("created_by"),
         "created_at": plan.get("updated_at") or plan.get("created_at"),
         "status": plan.get("status") or "draft",
-        "is_active": _safe_bool(plan.get("is_active"), True),
+        "is_active": resolve_plan_is_active(plan),
     }
 
 
@@ -418,14 +557,21 @@ def _bigquery_plan_stand_rows(
     plan_department_id: str,
     selected_stands: list[dict] | None,
 ) -> list[dict]:
-    rows = []
+    stand_counts = {}
     for stand in normalize_selected_stands(selected_stands):
+        stand_id = stand.get("stand_id")
+        if not stand_id:
+            continue
+        stand_counts[stand_id] = stand_counts.get(stand_id, 0) + 1
+
+    rows = []
+    for stand_id, quantity in stand_counts.items():
         rows.append(
             {
-                "plan_stand_id": f"{plan_department_id}-{stand.get('stand_id')}",
+                "plan_stand_id": f"{plan_department_id}-{stand_id}",
                 "plan_department_id": plan_department_id,
-                "stand_id": stand.get("stand_id"),
-                "quantity": _safe_int(stand.get("quantity"), 0),
+                "stand_id": stand_id,
+                "quantity": quantity,
             }
         )
     return rows
@@ -459,16 +605,21 @@ def _plan_from_bigquery_rows(rows: list[dict]) -> dict | None:
         sqm = _safe_float(row.get("sqm"), 0.0)
         if quantity <= 0:
             continue
-        department["selected_stands"].append(
-            {
-                "stand_id": row.get("stand_id"),
-                "stand_name": row.get("stand_name"),
-                "stand_type": row.get("stand_type"),
-                "sqm": round(sqm, 2),
-                "quantity": quantity,
-                "total_sqm": round(quantity * sqm, 2),
-            }
-        )
+        for instance_index in range(quantity):
+            department["selected_stands"].append(
+                {
+                    "stand_instance_id": f"{plan_department_id}-{row.get('stand_id')}-{instance_index + 1}",
+                    "stand_id": row.get("stand_id"),
+                    "stand_name": row.get("stand_name"),
+                    "stand_type": row.get("stand_type"),
+                    "stand_height": row.get("stand_height"),
+                    "arms": row.get("arms"),
+                    "sqm": round(sqm, 2),
+                    "quantity": 1,
+                    "total_sqm": round(sqm, 2),
+                    "assigned_products": [],
+                }
+            )
 
     departments = [
         normalized
@@ -513,7 +664,7 @@ def _plan_from_bigquery_rows(rows: list[dict]) -> dict | None:
             {
                 "branch_id": first.get("branch_id"),
                 "facia": first.get("facia"),
-                "department": current_department.get("department"),
+                "plan_name": first.get("plan_name"),
             }
         ),
         "saved_plan_ref": first.get("plan_id"),
@@ -552,6 +703,8 @@ def _load_bigquery_plan_rows(saved_plan_ref: str | None = None) -> list[dict]:
       ps.quantity,
       sl.stand_name,
       sl.stand_type,
+      sl.stand_height,
+      sl.arms,
       sl.sqm
     FROM `{dataset}.plans` p
     INNER JOIN `{dataset}.plan_departments` pd
@@ -658,6 +811,7 @@ def persist_plan_to_bigquery(plan: dict) -> dict:
     return {
         **plan,
         "plan_id": plan_id,
+        "plan_key": make_plan_key(plan),
         "plan_department_id": None,
         "created_at": plan_header_row["created_at"],
         "updated_at": plan_header_row["created_at"],
@@ -737,20 +891,22 @@ def persist_plan(plan: dict) -> dict:
             csv_path = persist_plan_snapshot_to_csv(plan)
             return {
                 **plan,
+                "plan_key": make_plan_key(plan),
                 "saved_plan_ref": make_plan_key(plan),
                 "storage_backend": "csv-fallback",
                 "storage_location": str(csv_path),
                 "storage_error": str(exc),
-                "is_active": _safe_bool(plan.get("is_active"), True),
+                "is_active": resolve_plan_is_active(plan),
             }
 
     csv_path = persist_plan_snapshot_to_csv(plan)
     return {
         **plan,
+        "plan_key": make_plan_key(plan),
         "saved_plan_ref": make_plan_key(plan),
         "storage_backend": "csv",
         "storage_location": str(csv_path),
-        "is_active": _safe_bool(plan.get("is_active"), True),
+        "is_active": resolve_plan_is_active(plan),
     }
 
 

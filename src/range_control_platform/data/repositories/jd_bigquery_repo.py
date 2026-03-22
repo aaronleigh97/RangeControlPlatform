@@ -40,6 +40,18 @@ class JDBigQueryReferenceDataRepository:
     ORDER BY stand_id
     """
 
+    _PRODUCT_RANGE_QUERY = """
+    SELECT
+      CAST(product_id AS STRING) AS product_id,
+      CAST(product_code AS STRING) AS product_code,
+      product_name,
+      department_name,
+      range_name
+    FROM `jds-gcp-dev-dl-odm-analytics.RangeControlPlatform.product_range_master`
+    WHERE department_name IS NOT NULL
+    ORDER BY department_name, range_name, product_name, product_code
+    """
+
     @staticmethod
     def _clean_text(value):
         text = str(value or "").strip()
@@ -54,11 +66,15 @@ class JDBigQueryReferenceDataRepository:
                 "Install the JD frameworks package or switch ENV back to 'local'."
             ) from exc
 
+        reference_data = seed_reference_data()
+
         stores_rows = bigquery(self._STORES_QUERY).to_dict("records")
         allocation_rows = bigquery(self._DEPARTMENT_GRADE_ALLOCATIONS_QUERY).to_dict("records")
         stand_rows = bigquery(self._STAND_LIBRARY_QUERY).to_dict("records")
-
-        reference_data = seed_reference_data()
+        try:
+            product_rows = bigquery(self._PRODUCT_RANGE_QUERY).to_dict("records")
+        except Exception:
+            product_rows = reference_data.get("products", [])
 
         open_stores = []
         facias = set()
@@ -67,6 +83,7 @@ class JDBigQueryReferenceDataRepository:
         branches = []
         department_grade_allocations = []
         stand_library = []
+        products = []
 
         for row in stores_rows:
             branch_id = self._clean_text(row.get("branch_id"))
@@ -154,6 +171,26 @@ class JDBigQueryReferenceDataRepository:
                 }
             )
 
+        for row in product_rows:
+            product_id = self._clean_text(row.get("product_id"))
+            product_code = self._clean_text(row.get("product_code"))
+            product_name = self._clean_text(row.get("product_name"))
+            department_name = self._clean_text(row.get("department_name"))
+
+            if not (product_id and product_name and department_name):
+                continue
+
+            departments.add(department_name)
+            products.append(
+                {
+                    "product_id": product_id,
+                    "product_code": product_code or product_id,
+                    "product_name": product_name,
+                    "department_name": department_name,
+                    "range_name": self._clean_text(row.get("range_name")),
+                }
+            )
+
         reference_data["facias"] = sorted(facias)
         reference_data["grades"] = sorted(grades)
         reference_data["departments"] = sorted(departments)
@@ -161,4 +198,5 @@ class JDBigQueryReferenceDataRepository:
         reference_data["stores"] = open_stores
         reference_data["department_grade_allocations"] = department_grade_allocations
         reference_data["stand_library"] = stand_library
+        reference_data["products"] = products
         return reference_data

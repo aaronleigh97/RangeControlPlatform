@@ -6,6 +6,7 @@ def layout():
     return dbc.Card(
         dbc.CardBody(
             [
+                dcc.Store(id="product-range-stand-store"),
                 html.H3("Plan Builder"),
                 html.P(
                     "Build a branch plan from the BigQuery-backed store, allocation, and stand-library data."
@@ -182,16 +183,71 @@ def layout():
 
                 html.Hr(),
 
-                html.H5("Selected Stands"),
+                dbc.Row(
+                    [
+                        dbc.Col(html.H5("Selected Stands", className="mb-0"), width=6),
+                        dbc.Col(
+                            [
+                                dbc.Label("Filter by Department", className="mb-1"),
+                                dcc.Dropdown(
+                                    id="selected-stands-dept-filter",
+                                    placeholder="ALL",
+                                    clearable=False,
+                                    disabled=True,
+                                ),
+                            ],
+                            width=4,
+                        ),
+                    ],
+                    className="g-2 align-items-end",
+                ),
                 html.Div(id="selected-stands-table"),
 
                 html.Hr(),
 
                 dbc.Button(
-                    "Save Plan Snapshot",
+                    "Save Plan",
                     id="plan-save-btn",
                     color="primary",
                     disabled=True,
+                ),
+                dbc.Offcanvas(
+                    [
+                        html.Div(id="product-range-stand-summary", className="mb-3"),
+                        dbc.Label("Department Product Range"),
+                        dcc.Dropdown(
+                            id="product-range-dd",
+                            placeholder="Select a product or range row",
+                            disabled=True,
+                        ),
+                        dbc.Button(
+                            "Assign To Stand",
+                            id="product-range-add-btn",
+                            color="primary",
+                            size="sm",
+                            className="mt-2",
+                            disabled=True,
+                        ),
+                        html.Div(
+                            id="product-range-feedback",
+                            className="mt-3",
+                        ),
+                        html.Hr(),
+                        html.H6("Assigned Product Rows"),
+                        html.Div(id="product-range-assigned-table"),
+                        dbc.Button(
+                            "Close",
+                            id="product-range-close-btn",
+                            color="secondary",
+                            outline=True,
+                            className="mt-3",
+                        ),
+                    ],
+                    id="product-range-offcanvas",
+                    title="Product Range Guidance",
+                    placement="end",
+                    is_open=False,
+                    scrollable=True,
                 ),
             ]
         )

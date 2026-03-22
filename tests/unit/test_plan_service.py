@@ -27,7 +27,9 @@ class TestPlanService(unittest.TestCase):
                 {
                     "stand_id": "ST01",
                     "stand_name": "Wall Bay Single",
-                    "stand_type": "Wall",
+                    "stand_type": "single",
+                    "stand_height": "Single",
+                    "arms": 2,
                     "sqm": 1.2,
                     "quantity": 3,
                 }
@@ -43,7 +45,9 @@ class TestPlanService(unittest.TestCase):
                         {
                             "stand_id": "ST01",
                             "stand_name": "Wall Bay Single",
-                            "stand_type": "Wall",
+                            "stand_type": "single",
+                            "stand_height": "Single",
+                            "arms": 2,
                             "sqm": 1.2,
                             "quantity": 3,
                         }
@@ -57,7 +61,9 @@ class TestPlanService(unittest.TestCase):
                         {
                             "stand_id": "ST02",
                             "stand_name": "Table",
-                            "stand_type": "Table",
+                            "stand_type": "double",
+                            "stand_height": "Double",
+                            "arms": 0,
                             "sqm": 1.5,
                             "quantity": 2,
                         }
@@ -68,17 +74,95 @@ class TestPlanService(unittest.TestCase):
 
     def test_normalize_selected_stands_recalculates_totals_and_drops_invalid_rows(self):
         stands = [
-            {"stand_id": "ST02", "stand_name": "Table", "stand_type": "Table", "sqm": "1.5", "quantity": 2},
-            {"stand_id": "ST01", "stand_name": "Wall", "stand_type": "Wall", "sqm": 1.2, "quantity": 1},
-            {"stand_id": "ST99", "stand_name": "Ignore", "stand_type": "Wall", "sqm": 2.0, "quantity": 0},
+            {"stand_id": "ST02", "stand_name": "Table", "stand_type": "Gondola", "stand_height": "Double", "arms": 0, "sqm": "1.5", "quantity": 2},
+            {"stand_id": "ST01", "stand_name": "Wall", "stand_type": "Wall", "stand_height": "Single", "arms": 2, "sqm": 1.2, "quantity": 1},
+            {"stand_id": "ST99", "stand_name": "Ignore", "stand_type": "Table", "stand_height": "Single", "arms": 1, "sqm": 2.0, "quantity": 0},
         ]
 
         normalized = plan_service.normalize_selected_stands(stands)
 
-        self.assertEqual(["ST01", "ST02"], [stand["stand_id"] for stand in normalized])
+        self.assertEqual(["ST01", "ST02", "ST02"], [stand["stand_id"] for stand in normalized])
         self.assertEqual(3, plan_service.compute_stand_count(normalized))
         self.assertEqual(4.2, plan_service.compute_used_space(normalized))
-        self.assertEqual(3.0, normalized[1]["total_sqm"])
+        self.assertEqual(1.5, normalized[1]["total_sqm"])
+        self.assertTrue(all(stand.get("stand_instance_id") for stand in normalized))
+
+    def test_compute_stand_product_capacity_uses_simplified_single_and_double_rule(self):
+        self.assertEqual(3, plan_service.compute_stand_product_capacity(2, "Single"))
+        self.assertEqual(6, plan_service.compute_stand_product_capacity(2, "Double"))
+        self.assertEqual(4, plan_service.compute_stand_product_capacity(1, "Single", quantity=2))
+        self.assertIsNone(plan_service.compute_stand_product_capacity(1, "table"))
+
+    def test_compute_stand_product_capacity_supports_real_jd_shape(self):
+        self.assertEqual(7, plan_service.compute_stand_product_capacity(6, "Single"))
+        self.assertEqual(14, plan_service.compute_stand_product_capacity(6, "Double"))
+
+    def test_build_stand_product_capacity_status_reports_underfilled(self):
+        status = plan_service.build_stand_product_capacity_status(
+            [
+                {"product_id": "P1", "product_name": "Tent One"},
+                {"product_id": "P2", "product_name": "Tent Two"},
+            ],
+            2,
+            "Double",
+        )
+
+        self.assertEqual("underfilled", status["status"])
+        self.assertEqual("Underfilled", status["label"])
+        self.assertEqual(2, status["assigned_count"])
+        self.assertEqual(6, status["capacity"])
+        self.assertEqual(4, status["remaining_slots"])
+
+    def test_build_stand_product_capacity_status_reports_just_right(self):
+        status = plan_service.build_stand_product_capacity_status(
+            [
+                {"product_id": "P1"},
+                {"product_id": "P2"},
+                {"product_id": "P3"},
+            ],
+            2,
+            "Single",
+        )
+
+        self.assertEqual("just_right", status["status"])
+        self.assertEqual(0, status["remaining_slots"])
+
+    def test_build_stand_product_capacity_status_reports_over_capacity(self):
+        status = plan_service.build_stand_product_capacity_status(
+            [
+                {"product_id": "P1"},
+                {"product_id": "P2"},
+                {"product_id": "P3"},
+            ],
+            0,
+            "Double",
+        )
+
+        self.assertEqual("over_capacity", status["status"])
+        self.assertEqual(2, status["capacity"])
+        self.assertEqual(-1, status["remaining_slots"])
+
+    def test_normalize_selected_stands_keeps_assigned_product_rows(self):
+        normalized = plan_service.normalize_selected_stands(
+            [
+                {
+                    "stand_id": "ST01",
+                    "stand_name": "Wall Bay Single",
+                    "stand_type": "Gondola",
+                    "stand_height": "Single",
+                    "arms": 2,
+                    "sqm": 1.2,
+                    "quantity": 1,
+                    "assigned_products": [
+                        {"product_id": "P2", "product_code": "P2", "product_name": "Tent Two"},
+                        {"product_id": "P1", "product_code": "P1", "product_name": "Tent One"},
+                        {"product_id": "P1", "product_code": "P1", "product_name": "Tent One"},
+                    ],
+                }
+            ]
+        )
+
+        self.assertEqual(["P1", "P2"], [row["product_id"] for row in normalized[0]["assigned_products"]])
 
     def test_persist_plan_snapshot_writes_selected_stands_and_migrates_legacy_header(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -116,6 +200,7 @@ class TestPlanService(unittest.TestCase):
         self.assertEqual("0002", header_row["branch_id"])
         self.assertEqual("Camping Trial", header_row["plan_name"])
         self.assertEqual("draft", header_row["status"])
+        self.assertTrue(header_row["is_active"])
         self.assertEqual(2, len(department_rows))
         self.assertEqual({"Accessories", "Camping"}, {row["department_name"] for row in department_rows})
         self.assertTrue(all(row["plan_id"] == "plan-123" for row in department_rows))
@@ -144,8 +229,10 @@ class TestPlanService(unittest.TestCase):
                     "stand_id": "ST01",
                     "stand_name": "Wall Bay Single",
                     "stand_type": "Wall",
+                    "stand_height": "Single",
                     "sqm": 1.2,
                     "quantity": 3,
+                    "arms": 2,
                 },
                 {
                     "plan_id": "plan-123",
@@ -163,8 +250,10 @@ class TestPlanService(unittest.TestCase):
                     "stand_id": "ST02",
                     "stand_name": "Table",
                     "stand_type": "Table",
+                    "stand_height": "Double",
                     "sqm": 1.5,
                     "quantity": 2,
+                    "arms": 0,
                 }
             ]
         )
@@ -181,28 +270,30 @@ class TestPlanService(unittest.TestCase):
         self.assertEqual(5, plan["total_stand_units"])
         self.assertEqual(6.6, plan["total_used_space"])
         self.assertEqual(2, plan["department_count"])
-        self.assertEqual("0002|GO Outdoors", plan["plan_key"])
-        self.assertEqual("0002|GO Outdoors", plan_service.branch_saved_plan_ref(plan))
+        self.assertEqual("0002|GO Outdoors|camping trial", plan["plan_key"])
+        self.assertEqual("0002|GO Outdoors|camping trial", plan_service.branch_saved_plan_ref(plan))
 
-    def test_list_latest_plans_keeps_only_latest_snapshot_per_branch_plan(self):
+    def test_list_latest_plans_keeps_only_latest_snapshot_per_named_branch_plan(self):
         older = {
             "plan_id": "plan-older",
             "branch_id": "0002",
             "facia": "GO Outdoors",
+            "plan_name": "Camping Trial",
             "department": "Camping",
             "saved_at": "2026-03-18T10:00:00+00:00",
             "updated_at": "2026-03-18T10:00:00+00:00",
-            "plan_key": "0002|GO Outdoors",
+            "plan_key": "0002|GO Outdoors|camping trial",
             "saved_plan_ref": "plan-older",
         }
         newer = {
             "plan_id": "plan-newer",
             "branch_id": "0002",
             "facia": "GO Outdoors",
+            "plan_name": "Camping Trial",
             "department": "Camping",
             "saved_at": "2026-03-18T11:00:00+00:00",
             "updated_at": "2026-03-18T11:00:00+00:00",
-            "plan_key": "0002|GO Outdoors",
+            "plan_key": "0002|GO Outdoors|camping trial",
             "saved_plan_ref": "plan-newer",
         }
 
@@ -211,17 +302,48 @@ class TestPlanService(unittest.TestCase):
 
         self.assertEqual(1, len(latest))
         self.assertEqual("plan-newer", latest[0]["plan_id"])
-        self.assertEqual("0002|GO Outdoors", latest[0]["plan_key"])
+        self.assertEqual("0002|GO Outdoors|camping trial", latest[0]["plan_key"])
+
+    def test_list_latest_plans_keeps_separate_named_plans_for_same_branch(self):
+        first = {
+            "plan_id": "plan-1",
+            "branch_id": "0002",
+            "facia": "GO Outdoors",
+            "plan_name": "Test 1",
+            "saved_at": "2026-03-18T10:00:00+00:00",
+            "updated_at": "2026-03-18T10:00:00+00:00",
+            "plan_key": "0002|GO Outdoors|test 1",
+            "saved_plan_ref": "plan-1",
+            "is_active": True,
+        }
+        second = {
+            "plan_id": "plan-2",
+            "branch_id": "0002",
+            "facia": "GO Outdoors",
+            "plan_name": "Test 2",
+            "saved_at": "2026-03-18T11:00:00+00:00",
+            "updated_at": "2026-03-18T11:00:00+00:00",
+            "plan_key": "0002|GO Outdoors|test 2",
+            "saved_plan_ref": "plan-2",
+            "is_active": True,
+        }
+
+        with patch.object(plan_service, "load_plan_snapshots", return_value=[first, second]):
+            latest = plan_service.list_latest_plans()
+
+        self.assertEqual(2, len(latest))
+        self.assertEqual({"plan-1", "plan-2"}, {row["plan_id"] for row in latest})
 
     def test_list_latest_plans_hides_logical_plans_with_inactive_latest_snapshot(self):
         active = {
             "plan_id": "plan-active",
             "branch_id": "0002",
             "facia": "GO Outdoors",
+            "plan_name": "Camping Trial",
             "department": "Camping",
             "saved_at": "2026-03-18T10:00:00+00:00",
             "updated_at": "2026-03-18T10:00:00+00:00",
-            "plan_key": "0002|GO Outdoors",
+            "plan_key": "0002|GO Outdoors|camping trial",
             "saved_plan_ref": "plan-active",
             "is_active": True,
         }
@@ -229,10 +351,11 @@ class TestPlanService(unittest.TestCase):
             "plan_id": "plan-deleted",
             "branch_id": "0002",
             "facia": "GO Outdoors",
+            "plan_name": "Camping Trial",
             "department": "Camping",
             "saved_at": "2026-03-18T11:00:00+00:00",
             "updated_at": "2026-03-18T11:00:00+00:00",
-            "plan_key": "0002|GO Outdoors",
+            "plan_key": "0002|GO Outdoors|camping trial",
             "saved_plan_ref": "plan-deleted",
             "is_active": False,
         }
@@ -246,7 +369,7 @@ class TestPlanService(unittest.TestCase):
         existing = {
             **self.plan,
             "plan_id": "plan-123",
-            "plan_key": "0002|GO Outdoors",
+            "plan_key": "0002|GO Outdoors|camping trial",
             "saved_plan_ref": "plan-123",
             "status": "draft",
             "is_active": True,
@@ -261,6 +384,20 @@ class TestPlanService(unittest.TestCase):
         self.assertEqual("new-created", deleted["created_at"])
         persist_mock.assert_called_once()
 
+    def test_resolve_plan_is_active_only_allows_false_for_deleted_status(self):
+        self.assertTrue(plan_service.resolve_plan_is_active({"status": "draft", "is_active": False}))
+        self.assertTrue(plan_service.resolve_plan_is_active({"status": "saved", "is_active": False}))
+        self.assertFalse(plan_service.resolve_plan_is_active({"status": "deleted", "is_active": False}))
+
+    def test_persist_plan_forces_active_true_for_non_deleted_snapshots(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.object(plan_service, "_project_root", return_value=Path(temp_dir)):
+                result = plan_service.persist_plan({**self.plan, "is_active": False, "status": "draft"})
+                rows = plan_service.load_plan_snapshots_from_csv()
+
+        self.assertTrue(result["is_active"])
+        self.assertTrue(rows[-1]["is_active"])
+
     def test_persist_plan_falls_back_to_csv_when_bigquery_save_fails(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             with patch.object(plan_service, "_use_bigquery_plan_storage", return_value=True):
@@ -274,6 +411,7 @@ class TestPlanService(unittest.TestCase):
 
             self.assertEqual("csv-fallback", result["storage_backend"])
             self.assertEqual(plan_service.make_plan_key(self.plan), result["saved_plan_ref"])
+            self.assertEqual(plan_service.make_plan_key(self.plan), result["plan_key"])
             self.assertTrue((Path(temp_dir) / "data_exports" / "plans.csv").exists())
 
 

@@ -1,14 +1,18 @@
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from dash import ALL, Input, Output, State, ctx, html, no_update
 import dash_bootstrap_components as dbc
 
 from range_control_platform.services.plan_service import (
+    build_stand_product_capacity_status,
     branch_saved_plan_ref,
+    compute_stand_product_capacity,
     deactivate_plan,
     flatten_plan_stands,
     get_saved_plan,
     list_latest_plans,
+    normalize_assigned_products,
     normalize_selected_stands,
     normalize_department_plan,
     normalize_plan_departments,
@@ -53,7 +57,10 @@ def _remaining_space_indicator(allowed_space, remaining_space):
     except (TypeError, ValueError):
         return dbc.Badge("Status: Unknown", color="secondary", className="ms-2")
 
-    if remaining <= 0:
+    if remaining < 0:
+        return dbc.Badge("Status: Over Limit", color="danger", className="ms-2")
+
+    if remaining == 0:
         return dbc.Badge("Status: No Space Remaining", color="danger", className="ms-2")
 
     if allowed <= 0:
@@ -72,17 +79,33 @@ def _remaining_space_indicator(allowed_space, remaining_space):
     )
 
 
+def _over_limit_warning(remaining_space):
+    if remaining_space is None:
+        return None
+    try:
+        remaining = float(remaining_space)
+    except (TypeError, ValueError):
+        return None
+    if remaining >= 0:
+        return None
+    return html.Div(
+        f"Over department allowance by {_fmt_number(abs(remaining))} sqm.",
+        style={"color": "crimson", "fontWeight": "600"},
+    )
+
+
 def _branch_remaining_space(plan):
+    square_footage = (plan or {}).get("square_footage")
+    if square_footage is not None:
+        try:
+            branch_capacity = float(square_footage)
+            branch_used = float((plan or {}).get("total_used_space") or 0.0)
+            return branch_capacity, round(branch_capacity - branch_used, 2)
+        except (TypeError, ValueError):
+            return None, None
+
     departments = normalize_plan_departments({"departments": (plan or {}).get("departments") or []})
     if not departments:
-        square_footage = plan.get("square_footage")
-        if square_footage is not None:
-            try:
-                branch_capacity = float(square_footage)
-                branch_used = float(plan.get("total_used_space") or 0.0)
-                return branch_capacity, round(branch_capacity - branch_used, 2)
-            except (TypeError, ValueError):
-                return None, None
         return None, None
 
     allowed_total = sum(
@@ -113,6 +136,7 @@ def _saved_plan_options(ref_data):
 
 def _saved_plan_options_from_rows(rows, ref_data):
     options = []
+    seen_values = set()
     for row in rows or []:
         row = _hydrate_saved_plan(row, ref_data)
         title = row.get("plan_name") or f"{row.get('branch_id')} | {row.get('facia')}"
@@ -121,7 +145,11 @@ def _saved_plan_options_from_rows(rows, ref_data):
             f"{row.get('branch_id')} | {row.get('facia')} | "
             f"{row.get('saved_at') or row.get('updated_at') or ''}"
         )
-        options.append({"label": label, "value": row.get("plan_key") or row.get("saved_plan_ref")})
+        value = row.get("saved_plan_ref") or row.get("plan_id") or row.get("plan_key")
+        if value in seen_values:
+            continue
+        seen_values.add(value)
+        options.append({"label": label, "value": value})
     return options
 
 
@@ -130,11 +158,11 @@ def _merge_latest_saved_plan(rows, saved_plan):
     if not saved_plan:
         return rows or []
 
-    saved_key = saved_plan.get("plan_key") or branch_saved_plan_ref(saved_plan)
+    saved_key = saved_plan.get("plan_key")
     merged_rows = []
     replaced = False
     for row in rows or []:
-        row_key = row.get("plan_key") or branch_saved_plan_ref(row)
+        row_key = row.get("plan_key")
         if row_key == saved_key:
             merged_rows.append(saved_plan)
             replaced = True
@@ -194,6 +222,130 @@ def _find_stand(ref_data, stand_id):
     return next(
         (row for row in ref_data.get("stand_library", []) if row.get("stand_id") == stand_id),
         None,
+    )
+
+
+def _find_product(ref_data, product_id, department=None):
+    if not ref_data or not product_id:
+        return None
+    return next(
+        (
+            row
+            for row in ref_data.get("products", [])
+            if row.get("product_id") == product_id
+            and (not department or row.get("department_name") == department)
+        ),
+        None,
+    )
+
+
+def _product_options(ref_data, department):
+    if not ref_data or not department:
+        return []
+
+    products = [
+        row
+        for row in ref_data.get("products", [])
+        if row.get("department_name") == department
+    ]
+    products.sort(
+        key=lambda row: (
+            str(row.get("range_name") or ""),
+            str(row.get("product_name") or ""),
+            str(row.get("product_code") or ""),
+        )
+    )
+    return [
+        {
+            "label": (
+                f"{row.get('product_code') or row.get('product_id')} - "
+                f"{row.get('product_name') or 'Unnamed Product'}"
+                + (
+                    f" ({row.get('range_name')})"
+                    if row.get("range_name")
+                    else ""
+                )
+            ),
+            "value": row.get("product_id"),
+        }
+        for row in products
+    ]
+
+
+def _find_selected_stand(plan, department, stand_id):
+    department_plan = _get_department_plan(plan, department)
+    if not department_plan:
+        return None
+    target_instance_id = None
+    target_stand_id = stand_id
+    if isinstance(stand_id, dict):
+        target_instance_id = stand_id.get("stand_instance_id")
+        target_stand_id = stand_id.get("stand_id")
+    return next(
+        (
+            row
+            for row in department_plan.get("selected_stands") or []
+            if (
+                (target_instance_id and row.get("stand_instance_id") == target_instance_id)
+                or (not target_instance_id and row.get("stand_id") == target_stand_id)
+            )
+        ),
+        None,
+    )
+
+
+def _replace_stand_in_department(department_plan, updated_stand):
+    selected_stands = []
+    replaced = False
+    for stand in normalize_selected_stands((department_plan or {}).get("selected_stands")):
+        if stand.get("stand_instance_id") == updated_stand.get("stand_instance_id"):
+            selected_stands.append(updated_stand)
+            replaced = True
+        else:
+            selected_stands.append(stand)
+
+    if not replaced:
+        selected_stands.append(updated_stand)
+
+    return {
+        **(department_plan or {}),
+        "selected_stands": normalize_selected_stands(selected_stands),
+    }
+
+
+def _stand_product_feedback(stand):
+    capacity_class = stand.get("stand_height") or stand.get("stand_type")
+    status = build_stand_product_capacity_status(
+        stand.get("assigned_products"),
+        stand.get("arms"),
+        capacity_class,
+        quantity=stand.get("quantity"),
+    )
+    if status["capacity"] is None:
+        body = "Product guidance is unavailable because this stand does not expose a supported single/double capacity class."
+    elif status["status"] == "over_capacity":
+        body = (
+            f"{status['assigned_count']} assigned against capacity {status['capacity']}. "
+            f"Remove {abs(status['remaining_slots'])} row(s) to get back within guidance."
+        )
+    elif status["status"] == "just_right":
+        body = f"{status['assigned_count']} assigned against capacity {status['capacity']}. This stand is at guidance capacity."
+    else:
+        body = (
+            f"{status['assigned_count']} assigned against capacity {status['capacity']}. "
+            f"{status['remaining_slots']} slot(s) still open."
+        )
+
+    return dbc.Alert(
+        [
+            html.Strong(f"Status: {status['label']}"),
+            html.Div(body),
+            html.Small(
+                "This is a simplified guidance rail based on stand arms and single/double class, not product dimensions."
+            ),
+        ],
+        color=status["color"],
+        className="mb-0",
     )
 
 
@@ -357,7 +509,7 @@ def _cleared_plan_builder_state(status_message=None, *, clear_saved_selection=Tr
         None,
         None,
         [],
-        None,
+        "",
         None,
         None,
         None,
@@ -372,7 +524,7 @@ def _cleared_plan_builder_state_without_options(status_message=None, *, clear_sa
         None,
         None,
         [],
-        None,
+        "",
         None,
         None,
         None,
@@ -463,6 +615,7 @@ def _plan_summary_children(plan):
                                     html.Div(
                                         f"Branch plan stand units: {totals.get('total_stand_units', 0)}"
                                     ),
+                                    _over_limit_warning(branch_remaining_space),
                                 ]
                             )
                         ),
@@ -497,6 +650,7 @@ def _plan_summary_children(plan):
                                     html.Div(
                                         f"Selected stand units: {plan.get('stand_count', 0)}"
                                     ),
+                                    _over_limit_warning(plan.get("remaining_space")),
                                     html.Small(
                                         "Department space allowance is derived from the store grade "
                                         "and department allocation rules."
@@ -522,21 +676,39 @@ def _plan_summary_children(plan):
     )
 
 
-def _stand_table(plan):
+def _selected_stand_departments(plan):
+    departments = sorted(
+        {
+            stand.get("department")
+            for stand in flatten_plan_stands(plan)
+            if stand.get("department")
+        }
+    )
+    return departments
+
+
+def _stand_table(plan, department_filter=None):
     selected_stands = flatten_plan_stands(plan)
+    if department_filter:
+        selected_stands = [
+            stand for stand in selected_stands if stand.get("department") == department_filter
+        ]
     if not selected_stands:
+        if department_filter:
+            return html.Div(f"No stands added yet for {department_filter}.")
         return html.Div("No stands added yet.")
 
     header = html.Thead(
         html.Tr(
             [
                 html.Th("Department"),
+                html.Th("Instance"),
                 html.Th("Stand ID"),
                 html.Th("Stand"),
                 html.Th("Type"),
                 html.Th("Sqm"),
-                html.Th("Qty"),
-                html.Th("Total Sqm"),
+                html.Th("Product Guidance"),
+                html.Th("Product Range"),
                 html.Th("Remove"),
             ]
         )
@@ -546,12 +718,34 @@ def _stand_table(plan):
             html.Tr(
                 [
                     html.Td(stand.get("department") or "N/A"),
+                    html.Td(stand.get("stand_instance_id") or "N/A"),
                     html.Td(stand.get("stand_id")),
                     html.Td(stand.get("stand_name")),
                     html.Td(stand.get("stand_type") or ""),
                     html.Td(_fmt_number(stand.get("sqm"))),
-                    html.Td(stand.get("quantity")),
-                    html.Td(_fmt_number(stand.get("total_sqm"))),
+                    html.Td(
+                        dbc.Badge(
+                            (
+                                f"{status.get('label')}: "
+                                f"{status.get('assigned_count')}/{_fmt_number(status.get('capacity'))}"
+                            ),
+                            color=status.get("color"),
+                        )
+                    ),
+                    html.Td(
+                        dbc.Button(
+                            "Edit",
+                            id={
+                                "type": "open-product-range-btn",
+                                "department": stand.get("department"),
+                                "stand_id": stand.get("stand_id"),
+                                "stand_instance_id": stand.get("stand_instance_id"),
+                            },
+                            color="secondary",
+                            size="sm",
+                            outline=True,
+                        )
+                    ),
                     html.Td(
                         dbc.Button(
                             "Remove",
@@ -559,6 +753,7 @@ def _stand_table(plan):
                                 "type": "remove-stand-btn",
                                 "department": stand.get("department"),
                                 "stand_id": stand.get("stand_id"),
+                                "stand_instance_id": stand.get("stand_instance_id"),
                             },
                             color="link",
                             size="sm",
@@ -568,6 +763,14 @@ def _stand_table(plan):
                 ]
             )
             for stand in selected_stands
+            for status in [
+                build_stand_product_capacity_status(
+                    stand.get("assigned_products"),
+                    stand.get("arms"),
+                    stand.get("stand_height") or stand.get("stand_type"),
+                    stand.get("quantity"),
+                )
+            ]
         ]
     )
     return dbc.Table([header, body], bordered=False, hover=True, striped=True, size="sm")
@@ -1020,7 +1223,10 @@ def register_plan_callbacks(app):
         Output("stand-library-dd", "value"),
         Input("add-stand-btn", "n_clicks"),
         Input("clear-stands-btn", "n_clicks"),
-        Input({"type": "remove-stand-btn", "department": ALL, "stand_id": ALL}, "n_clicks"),
+        Input(
+            {"type": "remove-stand-btn", "department": ALL, "stand_id": ALL, "stand_instance_id": ALL},
+            "n_clicks",
+        ),
         State("stand-library-dd", "value"),
         State("stand-qty", "value"),
         State("dept-dd", "value"),
@@ -1078,12 +1284,12 @@ def register_plan_callbacks(app):
             if not any(click_count for click_count in (_remove_clicks or []) if click_count):
                 return no_update, no_update, no_update
             department_name = trigger.get("department")
-            stand_to_remove = trigger.get("stand_id")
+            stand_to_remove = trigger.get("stand_instance_id")
             target_department = _get_department_plan(department_plan_state, department_name) or {}
             filtered_stands = [
                 row
                 for row in normalize_selected_stands(target_department.get("selected_stands"))
-                if row.get("stand_id") != stand_to_remove
+                if row.get("stand_instance_id") != stand_to_remove
             ]
             updated_departments = _replace_department_plan(
                 department_plan_state,
@@ -1103,17 +1309,21 @@ def register_plan_callbacks(app):
             return no_update, no_update, no_update
 
         quantity = int(quantity)
-        existing_by_id = {row.get("stand_id"): dict(row) for row in selected_stands}
-        current = existing_by_id.get(stand_id, {})
-        new_quantity = int(current.get("quantity") or 0) + quantity
-        existing_by_id[stand_id] = {
-            "stand_id": stand.get("stand_id"),
-            "stand_name": stand.get("stand_name"),
-            "stand_type": stand.get("stand_type"),
-            "sqm": stand.get("sqm"),
-            "quantity": new_quantity,
-        }
-        normalized = normalize_selected_stands(list(existing_by_id.values()))
+        new_instances = [
+            {
+                "stand_instance_id": str(uuid4()),
+                "stand_id": stand.get("stand_id"),
+                "stand_name": stand.get("stand_name"),
+                "stand_type": stand.get("stand_type"),
+                "stand_height": stand.get("stand_height"),
+                "arms": stand.get("arms"),
+                "sqm": stand.get("sqm"),
+                "quantity": 1,
+                "assigned_products": [],
+            }
+            for _ in range(quantity)
+        ]
+        normalized = normalize_selected_stands([*selected_stands, *new_instances])
         updated_departments = _replace_department_plan(
             department_plan_state,
             {
@@ -1132,17 +1342,282 @@ def register_plan_callbacks(app):
         return updated_departments, updated_plan, None
 
     @app.callback(
-        Output("plan-summary", "children"),
-        Output("selected-stands-table", "children"),
+        Output("product-range-offcanvas", "is_open"),
+        Output("product-range-stand-store", "data"),
+        Output("product-range-dd", "value"),
+        Output("product-range-feedback", "children"),
+        Input(
+            {"type": "open-product-range-btn", "department": ALL, "stand_id": ALL, "stand_instance_id": ALL},
+            "n_clicks",
+        ),
+        Input("product-range-close-btn", "n_clicks"),
         Input("plan-draft-store", "data"),
         Input("plan-departments-store", "data"),
+        State("product-range-stand-store", "data"),
+        prevent_initial_call=True,
+    )
+    def toggle_product_range_offcanvas(
+        _open_clicks,
+        _close_clicks,
+        plan,
+        departments,
+        active_stand,
+    ):
+        trigger = ctx.triggered_id
+        composed_plan = {"departments": departments or []}
+
+        if not plan:
+            return False, None, None, None
+
+        if trigger == "product-range-close-btn":
+            return False, None, None, None
+
+        if isinstance(trigger, dict) and trigger.get("type") == "open-product-range-btn":
+            if not any(click_count for click_count in (_open_clicks or []) if click_count):
+                return False, None, None, None
+            stand_ref = {
+                "department": trigger.get("department"),
+                "stand_id": trigger.get("stand_id"),
+                "stand_instance_id": trigger.get("stand_instance_id"),
+            }
+            return True, stand_ref, None, None
+
+        if trigger in {"plan-draft-store", "plan-departments-store"}:
+            return False, None, None, None
+
+        return False, None, None, None
+
+    @app.callback(
+        Output("product-range-stand-summary", "children"),
+        Output("product-range-assigned-table", "children"),
+        Output("product-range-dd", "options"),
+        Output("product-range-dd", "disabled"),
+        Input("product-range-stand-store", "data"),
+        Input("plan-departments-store", "data"),
+        Input("ref-data-store", "data"),
+    )
+    def render_product_range_panel(active_stand, departments, ref_data):
+        if not active_stand:
+            return html.Div("Select a stand to assign product rows."), html.Div(), [], True
+
+        plan = {"departments": departments or []}
+        stand = _find_selected_stand(
+            plan,
+            active_stand.get("department"),
+            {
+                "stand_id": active_stand.get("stand_id"),
+                "stand_instance_id": active_stand.get("stand_instance_id"),
+            },
+        )
+        if not stand:
+            return html.Div("Selected stand is no longer available in the draft."), html.Div(), [], True
+
+        capacity = compute_stand_product_capacity(
+            stand.get("arms"),
+            stand.get("stand_height") or stand.get("stand_type"),
+            quantity=stand.get("quantity"),
+        )
+        summary = html.Div(
+            [
+                html.Div(
+                    f"{active_stand.get('department')} | {stand.get('stand_id')} - {stand.get('stand_name')}"
+                ),
+                html.Small(
+                    f"Instance: {stand.get('stand_instance_id') or 'N/A'} | "
+                    f"Stand type: {stand.get('stand_type') or 'N/A'} | Capacity class: {stand.get('stand_height') or 'N/A'} | Arms: {_fmt_number(stand.get('arms'))} | "
+                    f"Quantity: {stand.get('quantity') or 0} | Capacity: {_fmt_number(capacity)}"
+                ),
+                html.Div(className="mt-2", children=_stand_product_feedback(stand)),
+            ]
+        )
+
+        assigned_products = normalize_assigned_products(stand.get("assigned_products"))
+        if assigned_products:
+            assigned_table = dbc.Table(
+                [
+                    html.Thead(
+                        html.Tr(
+                            [
+                                html.Th("Code"),
+                                html.Th("Product"),
+                                html.Th("Range"),
+                                html.Th("Remove"),
+                            ]
+                        )
+                    ),
+                    html.Tbody(
+                        [
+                            html.Tr(
+                                [
+                                    html.Td(product.get("product_code") or product.get("product_id")),
+                                    html.Td(product.get("product_name") or "N/A"),
+                                    html.Td(product.get("range_name") or "N/A"),
+                                    html.Td(
+                                        dbc.Button(
+                                            "Remove",
+                                            id={
+                                                "type": "remove-product-range-btn",
+                                                "department": active_stand.get("department"),
+                                                "stand_id": active_stand.get("stand_id"),
+                                                "stand_instance_id": active_stand.get("stand_instance_id"),
+                                                "product_id": product.get("product_id"),
+                                            },
+                                            color="link",
+                                            size="sm",
+                                            className="p-0",
+                                        )
+                                    ),
+                                ]
+                            )
+                            for product in assigned_products
+                        ]
+                    ),
+                ],
+                bordered=False,
+                hover=True,
+                striped=True,
+                size="sm",
+            )
+        else:
+            assigned_table = html.Div("No product rows assigned to this stand yet.")
+
+        options = _product_options(ref_data, active_stand.get("department"))
+        return summary, assigned_table, options, not bool(options)
+
+    @app.callback(
+        Output("product-range-add-btn", "disabled"),
+        Input("product-range-stand-store", "data"),
+        Input("product-range-dd", "value"),
+    )
+    def toggle_product_range_add(active_stand, selected_product_id):
+        return not bool(active_stand and selected_product_id)
+
+    @app.callback(
+        Output("plan-departments-store", "data", allow_duplicate=True),
+        Output("plan-draft-store", "data", allow_duplicate=True),
+        Output("product-range-dd", "value", allow_duplicate=True),
+        Output("product-range-feedback", "children", allow_duplicate=True),
+        Input("product-range-add-btn", "n_clicks"),
+        Input(
+            {
+                "type": "remove-product-range-btn",
+                "department": ALL,
+                "stand_id": ALL,
+                "stand_instance_id": ALL,
+                "product_id": ALL,
+            },
+            "n_clicks",
+        ),
+        State("product-range-dd", "value"),
+        State("product-range-stand-store", "data"),
+        State("plan-draft-store", "data"),
+        State("plan-departments-store", "data"),
+        State("ref-data-store", "data"),
+        prevent_initial_call=True,
+    )
+    def update_product_range_assignments(
+        _add_clicks,
+        _remove_clicks,
+        selected_product_id,
+        active_stand,
+        plan,
+        departments,
+        ref_data,
+    ):
+        if not plan or not active_stand:
+            return no_update, no_update, no_update, no_update
+
+        trigger = ctx.triggered_id
+        department_plan_state = {"departments": departments or []}
+        target_department = _get_department_plan(
+            department_plan_state,
+            active_stand.get("department"),
+        )
+        if not target_department:
+            return no_update, no_update, no_update, no_update
+
+        stand = _find_selected_stand(
+            department_plan_state,
+            active_stand.get("department"),
+            {
+                "stand_id": active_stand.get("stand_id"),
+                "stand_instance_id": active_stand.get("stand_instance_id"),
+            },
+        )
+        if not stand:
+            return no_update, no_update, no_update, no_update
+
+        assigned_products = normalize_assigned_products(stand.get("assigned_products"))
+
+        if isinstance(trigger, dict) and trigger.get("type") == "remove-product-range-btn":
+            if not any(click_count for click_count in (_remove_clicks or []) if click_count):
+                return no_update, no_update, no_update, no_update
+            updated_products = [
+                row for row in assigned_products if row.get("product_id") != trigger.get("product_id")
+            ]
+        else:
+            product = _find_product(
+                ref_data,
+                selected_product_id,
+                department=active_stand.get("department"),
+            )
+            if not product:
+                return no_update, no_update, no_update, no_update
+            updated_products = normalize_assigned_products([*assigned_products, product])
+
+        updated_stand = {
+            **stand,
+            "assigned_products": updated_products,
+        }
+        updated_department = _replace_stand_in_department(target_department, updated_stand)
+        updated_departments = _replace_department_plan(
+            department_plan_state,
+            {
+                **updated_department,
+                "department": active_stand.get("department"),
+            },
+        )
+        updated_plan = _compose_plan(
+            ref_data,
+            {**plan, "department": active_stand.get("department")},
+            updated_departments,
+        )
+        return updated_departments, updated_plan, None, _stand_product_feedback(updated_stand)
+
+    @app.callback(
+        Output("plan-summary", "children"),
+        Output("selected-stands-table", "children"),
+        Output("selected-stands-dept-filter", "options"),
+        Output("selected-stands-dept-filter", "disabled"),
+        Output("selected-stands-dept-filter", "value"),
+        Input("plan-draft-store", "data"),
+        Input("plan-departments-store", "data"),
+        Input("selected-stands-dept-filter", "value"),
         State("ref-data-store", "data"),
     )
-    def render_plan_builder(plan, departments, ref_data):
+    def render_plan_builder(plan, departments, selected_stands_department, ref_data):
         plan = _compose_plan(ref_data, plan, departments)
+        stand_departments = _selected_stand_departments(plan)
+        filter_options = [{"label": "ALL", "value": "__all__"}] + [
+            {"label": department, "value": department}
+            for department in stand_departments
+        ]
+        effective_filter = (
+            None
+            if not selected_stands_department or selected_stands_department == "__all__"
+            else selected_stands_department
+        )
+        next_filter_value = (
+            selected_stands_department
+            if selected_stands_department in {option["value"] for option in filter_options}
+            else "__all__"
+        )
         return (
             _plan_summary_children(plan),
-            _stand_table(plan),
+            _stand_table(plan, effective_filter),
+            filter_options,
+            not bool(stand_departments),
+            next_filter_value,
         )
 
     @app.callback(
