@@ -157,11 +157,76 @@ This is a good example of professional engineering discipline because the work:
 The next best move is to stop extending temporary builder polish and move into the next real synoptic business slice.
 
 Recommended next implementation focus:
-1. define the next layer of rule-driving data around categories and SKU allocation
-2. extend the plan model so category-level planning can sit inside the department rows
-3. start the next validation slice with category/SKU allocation and stand-capacity rules
+1. add a Product Range workflow inside the existing Plan Builder using a compact offcanvas interaction
+2. use stand `arms` plus `stand_type` as a simplified product-capacity rule rather than pretending product dimensions exist
+3. introduce guidance rails so the user can see when a department/stand is overfilled, underfilled, or in the acceptable range
+4. preserve auditability of product-range decisions so buyer choices can be reviewed later
 
 Why this is next:
 - the branch-plan foundation is now materially more stable
-- the biggest remaining synoptic gap is no longer builder state, it is missing business-rule depth
-- category, SKU, and validation logic are central to the final acceptance criteria and reporting requirements
+- the biggest remaining synoptic gap is no longer builder state, it is missing the next defensible business-rule slice
+- current source data supports a simplified capacity model through stand metadata, especially `arms`
+- this provides a realistic bridge between stand planning and later audit/validation/reporting requirements
+
+## End-of-Session Reflection
+
+Additional business clarification received at the end of the session:
+
+- the Product Range feature should use `stand_type` (`single` / `double`) rather than `stand_height` for the simplified capacity rule
+- the purpose of the feature is not to imitate true product-dimension planning
+- the purpose is to create guidance rails and auditable buyer decisions at stand / department level
+
+That means the next implementation should be framed as:
+
+- a controlled product-allocation aid
+- capacity based on stand metadata already available in the model
+- visual feedback for underfilled / just-right / over-capacity states
+- auditable decision capture rather than opaque buyer judgement
+
+## Ready Start For Next Session
+
+Use this implementation order next:
+
+1. Add a repository method for product data and confirm the minimum query fields
+2. Add a pure helper for stand product capacity:
+   - `single = arms + 1`
+   - `double = (arms + 1) * 2`
+3. Add unit tests for the helper and status thresholds
+4. Extend the plan draft model so each selected stand can hold assigned product rows
+5. Add a Plan Builder offcanvas for one selected stand at a time
+6. Filter products by department inside the offcanvas
+7. Add live status feedback for:
+   - underfilled
+   - just right
+   - over capacity
+8. Decide how to persist and later audit product-range choices
+
+## Suggested Next Prompt
+
+```text
+Read docs/Synoptic-Project-Plan.md, docs/Project-Progress-Summary-2026-03-18.md, and docs/development-log/Session-12-Plan-Builder-State-Safety-and-UX-Polish.md. Continue from the latest Daily Update section. Start by wiring a product BigQuery query behind the repository layer, then implement a Product Range offcanvas on the Plan Builder that assigns products to selected stands using the simplified capacity rule `single = arms + 1` and `double = (arms + 1) * 2`. Add visual guidance for underfilled / just-right / over-capacity states, add tests for the capacity helper and draft-state behaviour, and update the docs when finished.
+```
+
+## Follow-up Outcome - 2026-03-22
+
+The next session completed the recommended Product Range slice on the existing Plan Builder page.
+
+Completed in follow-up:
+
+- added a repository-backed product query shape with minimum fields:
+  - `product_id`
+  - `product_code`
+  - `product_name`
+  - `department_name`
+  - `range_name`
+- added pure helpers for stand product capacity and guidance status
+- extended selected stand draft rows so assigned product rows live with the stand they belong to
+- added a compact offcanvas for stand-level product assignment
+- filtered the available product list by the currently selected department
+- surfaced live `underfilled`, `just right`, and `over capacity` feedback in the stand table and offcanvas
+- covered the new helper logic and stand-assignment state updates with unit tests
+
+Important follow-up note:
+
+- BigQuery reference-data loading now falls back to seed product rows if the product table/query is unavailable, without discarding the rest of the JD-backed reference data
+- BigQuery plan persistence still needs a confirmed schema extension before assigned product rows can be saved and reloaded as first-class audit records

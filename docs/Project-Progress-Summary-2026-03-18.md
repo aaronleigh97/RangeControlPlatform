@@ -21,6 +21,7 @@ The application can currently:
   - `stores`
   - `department_grade_allocations`
   - `stand_library`
+  - product-range rows with department mapping
 - fall back to local seed data when BigQuery loading is unavailable
 - allow a user to select:
   - fascia
@@ -29,12 +30,16 @@ The application can currently:
 - derive the selected store's fixed grade
 - derive department allowance from grade-based department allocation data
 - allow a user to add stands from the stand library with quantities
+- allow a user to assign simplified product-range rows to a selected stand inside the existing Plan Builder
+- allow a user to edit or remove individual stand instances rather than only whole aggregated stand quantities
 - calculate:
   - used stand space
   - remaining department allowance
+  - simplified stand product capacity from `arms` plus `stand_type`
 - validate the saved plan against department space allowance
 - save local plan snapshots with:
   - selected stands
+  - assigned product rows nested under selected stand rows
   - store grade
   - allowed space
   - used space
@@ -47,6 +52,10 @@ This means the application now reflects a real business workflow path:
 `store -> grade -> department allowance -> stand selection -> used space -> validation`
 
 That is a significant improvement over the earlier stand-count-only prototype logic.
+
+Important scope note:
+
+The currently confirmed source data supports stand-space planning and a simplified product guidance model, not true product-level physical-capacity planning. In other words, the application can currently reason about how much space selected stands occupy within department and branch context, and it can give auditable guidance on product-row count per stand using `arms` plus `stand_type`, but it still does not have source-backed SKU dimension or per-product fixture-capacity data.
 
 ---
 
@@ -80,6 +89,11 @@ Completed work:
 - replaced stand-count entry with stand-library selection
 - enabled stand quantity entry
 - added selected-stand accumulation within the plan
+- added a compact Product Range offcanvas for one selected stand at a time
+- added department-filtered product selection for the active stand
+- added live underfilled / just-right / over-capacity feedback using the agreed simplified business rule
+- changed selected stand handling from aggregated quantity rows to stand instances so edits/removals can target one stand at a time
+- added a department filter above the Selected Stands table so long stand-instance lists remain manageable
 - added plan summary values for:
   - store grade
   - allowed department space
@@ -88,6 +102,39 @@ Completed work:
 - widened the local plan snapshot model to store richer plan data
 
 This changes the application from a rough prototype into a more realistic planning tool.
+
+### 2a. Product guidance and auditability slice
+
+Completed work:
+
+- defined a minimum product row contract of:
+  - `product_id`
+  - `product_code`
+  - `product_name`
+  - `department_name`
+  - `range_name`
+- loaded product rows through the repository layer with a BigQuery-first query and safe seed fallback
+- added a pure stand-capacity helper using:
+  - `single = arms + 1`
+  - `double = (arms + 1) * 2`
+- attached assigned product rows to each selected stand row in the in-app draft model
+- added status logic for:
+  - `underfilled`
+  - `just right`
+  - `over capacity`
+
+This is an honest extension of the business workflow because it creates explainable guidance rails and auditable buyer choices without claiming that the application knows true product dimensions.
+
+### 2b. Builder correctness and usability fixes
+
+Completed work:
+
+- corrected the saved-plan list so separate named plans on the same branch are no longer collapsed together
+- ensured normal saves remain active and only explicit delete actions persist inactive snapshots
+- corrected branch-level remaining space so it uses branch square footage rather than accidentally mirroring current-department allowance values
+- improved over-limit messaging so exact sqm overage is shown clearly on the status cards
+
+This matters because the synoptic evidence is stronger when the workflow behaves consistently under real user feedback, not only under the original happy-path implementation.
 
 ### 3. Validation improvements
 
@@ -274,6 +321,11 @@ To remain honest and academically defensible, the following limitations still ap
 - override workflow is not yet implemented
 - audit trail is not yet implemented
 - product/SKU assignment is not yet implemented
+- BigQuery persistence of stand-level product assignments is not yet implemented because the audit schema shape still needs to be agreed
+- no source-backed product/SKU physical-space dataset has been identified in the imported workbook set
+- any future category/SKU capacity logic will need either:
+  - a new source dataset, or
+  - a simplified business-rule model defined explicitly for the tool
 - budget rules and budget validation are not yet implemented
 - finalisation workflow is not yet implemented
 - reporting remains partial

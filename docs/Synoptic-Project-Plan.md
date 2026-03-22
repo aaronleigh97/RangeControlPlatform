@@ -6,6 +6,175 @@ Product Grading & Space Control Tool
 ## Purpose of this plan
 This file turns the synoptic requirements into an execution order that can be used across sessions. It also records what appears to be complete already, what is partially built, and what still needs to be done.
 
+## Data Reality Note
+
+The current source data confirmed for this project supports:
+
+- store-level context from `stores`
+- department allowance by grade from `department_grade_allocations`
+- stand footprint from `stand_library.sqm`
+
+The current source data does **not** include product/SKU physical-space fields such as:
+
+- SKU dimensions
+- facings
+- units per stand
+- per-product fixture capacity
+
+This means the implemented planning model is currently strongest and most defensible as:
+
+`store -> department allowance -> stand selection -> used stand sqm -> remaining space`
+
+If later phases introduce category or SKU rules, they should be described honestly as one of:
+
+1. a separate simplified business-rule model, such as per-category max SKU counts or per-stand-type item limits; or
+2. an extension that requires additional source data not currently present in the imported Excel workbooks.
+
+The project should not imply that it has true product-level physical-capacity data unless such a dataset is added explicitly.
+
+## Product Range Direction
+
+Latest business guidance confirms that the next product-facing slice should introduce guidance rails rather than attempt true physical product-space modelling.
+
+Confirmed direction:
+
+- stand `sqm` continues to control physical space usage
+- stand `arms` will be used as a simplified product-capacity signal
+- users should be guided when they have selected too many, not enough, or the right amount of product for a department/grade context
+- buyer decisions should remain auditable so that product-range choices can be reviewed later
+
+Current working rule for stand product capacity:
+
+- `0 arms` + `single` stand_type = `1` item slot
+- `0 arms` + `double` stand_type = `2` item slots
+- `1 arm` + `single` stand_type = `2` item slots
+- `1 arm` + `double` stand_type = `4` item slots
+- the same trend continues as `arms` increase
+
+Simple implementation formula:
+
+- `single` stand_type: `capacity = arms + 1`
+- `double` stand_type: `capacity = (arms + 1) * 2`
+
+This should be treated as a simplified business-capacity model, not as a claim that the tool has product-dimension data.
+
+## Daily Update - 2026-03-23
+
+### Last completed
+- [x] Corrected Product Range capacity guidance to use the real JD single/double class shape from `stand_height`
+- [x] Fixed saved-plan keying so multiple named plans on the same branch remain separate in the saved snapshot list
+- [x] Hardened plan persistence so non-deleted saves cannot accidentally persist with `is_active = false`
+- [x] Corrected branch draft remaining-space logic so branch status uses branch square footage rather than the current department allowance total
+- [x] Added clearer over-limit messaging and exact sqm overage warnings on the branch and department status cards
+- [x] Refactored selected stand draft rows to stand-instance level so edit/remove actions target one stand at a time
+- [x] Added a department filter above `Selected Stands` so the longer stand-instance list remains usable
+
+### In progress
+- [ ] Extend the Validation page so it reflects branch-level and stand-level rule outcomes, not just department space allowance
+
+### Blockers
+- Still waiting for the real product query/source shape so the Product Range offcanvas can move off the temporary seed/fallback list
+- BigQuery plan persistence still has no agreed schema for saving stand-level product assignments as first-class audit records
+
+### Next actions
+1. Extend the Validation page and validation logic for branch over-space, department over-space, and stand product over-capacity rules
+2. Wire the real product query into the repository layer once the source shape is confirmed
+3. Decide the BigQuery persistence shape for stand-level product assignments and later audit history
+
+### Files touched
+- `src/range_control_platform/controllers/plan_controller.py`
+- `src/range_control_platform/data/repositories/jd_bigquery_repo.py`
+- `src/range_control_platform/data/seed.py`
+- `src/range_control_platform/services/plan_service.py`
+- `src/range_control_platform/views/pages/plan_builder.py`
+- `tests/unit/test_plan_controller.py`
+- `tests/unit/test_plan_service.py`
+- `docs/Synoptic-Project-Plan.md`
+- `docs/Project-Progress-Summary-2026-03-18.md`
+- `docs/development-log/Session-12-Plan-Builder-State-Safety-and-UX-Polish.md`
+
+### Notes for next Codex session
+- Product guidance now works against the real JD stand shape by using `stand_height` for the simplified single/double capacity class while leaving `stand_type` as descriptive fixture type
+- Selected stands are now stored as stand instances in the draft so each row can be edited or removed independently
+- The saved-plan dropdown now identifies logical plans by branch + facia + plan name, which avoids named plans overwriting one another in the list
+- Validation is the next best slice because the builder state is now much richer than the Validation page currently reflects
+
+## Daily Update - 2026-03-22
+
+### Last completed
+- [x] Added repository-backed product-range reference data with a simple BigQuery query shape and seed fallback
+- [x] Added reusable stand product-capacity helpers using `arms` and `stand_type`
+- [x] Extended selected stand draft rows so product/range assignments are stored against each stand row
+- [x] Added a compact Product Range offcanvas to the existing Plan Builder page with department-filtered product selection
+- [x] Added live underfilled / just-right / over-capacity guidance in both the stand table and offcanvas
+- [x] Added unit tests for the capacity helper, status logic, and stand assignment state updates
+
+### In progress
+- [ ] Decide the first persistent audit shape for product-range assignments in the BigQuery `plan_stands` model
+
+### Blockers
+- BigQuery plan persistence does not yet have a confirmed column/schema shape for saving assigned product rows, so product assignments are currently draft-state / CSV-auditable only
+
+### Next actions
+1. Extend the BigQuery plan schema so `plan_stands` (or a child table) can persist assigned product rows without hiding the audit shape
+2. Surface saved product-range assignments on reload from BigQuery once the persistence contract is agreed
+3. Fold the new product-capacity status into the later validation/reporting slices
+
+### Files touched
+- `src/range_control_platform/data/repositories/jd_bigquery_repo.py`
+- `src/range_control_platform/data/seed.py`
+- `src/range_control_platform/services/plan_service.py`
+- `src/range_control_platform/controllers/plan_controller.py`
+- `src/range_control_platform/views/pages/plan_builder.py`
+- `tests/unit/test_plan_service.py`
+- `tests/unit/test_plan_controller.py`
+
+### Notes for next Codex session
+- Minimum in-app product row shape is now `product_id`, `product_code`, `product_name`, `department_name`, `range_name`
+- Product selection is filtered by the active department and attached to the selected stand row, not to the whole department
+- Capacity guidance is intentionally simplified: assigned row count vs `single` / `double` capacity from `arms`, multiplied by stand quantity
+- The UI still presents this as guidance rails and auditability, not physical optimisation
+- BigQuery reference-data loading now tolerates product-query failure and falls back to seed products without dropping the rest of the JD reference data
+
+## Daily Update - 2026-03-21
+
+### Last completed
+- [x] Added a safer branch-plan editing workflow with explicit unload/reset behaviour for loaded plans
+- [x] Added branch-level and department-level space status indicators to make current planning headroom easier to read
+- [x] Removed the temporary `Draft Debug` panel and cleaned the related callback output
+- [x] Fixed branch-draft state bugs where temporary department selection could leak into real draft rows
+- [x] Recorded that the available data supports stand-space planning but not true product-dimension capacity planning
+- [x] Agreed the next Product Range feature will use a simplified `arms` + `stand_type` capacity rule and should be built inside an offcanvas on the Plan Builder page
+
+### In progress
+- [ ] Prepare the next Product Range implementation slice so it can start from a clear repository/query contract and draft-state design
+
+### Blockers
+- Need the product BigQuery query / source shape so product rows can be filtered by department and attached to selected stands
+
+### Next actions
+1. Add the product query behind the repository layer and define the minimum product fields needed in-app
+2. Add a capacity helper using `arms` and `stand_type`, then cover it with unit tests
+3. Extend the branch draft model so each selected stand can hold assigned product/range rows
+4. Add an offcanvas on the Plan Builder for product assignment per selected stand
+5. Add live visual guidance for underfilled / just-right / over-capacity product assignment
+6. Decide the first auditable persistence shape for product-range choices
+
+### Files touched
+- `src/range_control_platform/controllers/plan_controller.py`
+- `src/range_control_platform/views/pages/plan_builder.py`
+- `tests/unit/test_plan_controller.py`
+- `docs/development-log/Session-12-Plan-Builder-State-Safety-and-UX-Polish.md`
+- `docs/Project-Progress-Summary-2026-03-18.md`
+- `docs/Synoptic-Project-Plan.md`
+
+### Notes for next Codex session
+- The current builder now behaves more safely: loaded plans can be unloaded explicitly, empty department rows are pruned, and temporary dropdown state no longer pollutes the real branch draft
+- `Store Context` has been reframed as `Branch Draft Status` so branch-level progress and current-department context are separated
+- The next product-facing slice should remain on the Plan Builder page, but in a compact offcanvas rather than inline on the long page
+- The agreed simplified stand product-capacity rule should use `arms` and `stand_type`, not product dimensions and not `stand_height`
+- The product feature should be presented honestly as guidance rails and auditability, not as true physical product-space optimisation
+
 ## Daily Update - 2026-03-19
 
 ### Last completed
@@ -129,9 +298,9 @@ This file turns the synoptic requirements into an execution order that can be us
 
 ### Partially complete
 - [ ] Plan creation is only partial.
-Current state: the app can save a department-level stand snapshot, but the plan model still needs to be corrected so one branch plan can contain multiple departments.
+Current state: the app can save a branch-level stand plan across multiple departments, but it still does not model category composition, SKU assignment, planning period, or final workflow state.
 - [ ] Validation is only partial.
-Current state: one selected department can be validated against its allowance; the full branch-level multi-department model, budget, category SKU allocation, stand capacity, and override-aware validation are missing.
+Current state: branch and department stand-space validation now exists, but budget, override-aware validation, and any category/SKU-level rule set are still missing.
 - [ ] Admin is only partial.
 Current state: admin page only displays seed reference data and does not manage configuration.
 - [ ] Overrides are only partial.
@@ -150,6 +319,11 @@ Current state: report page is mostly placeholder; required report outputs are no
 - [ ] Product-to-stand assignment
 - [ ] Budget engine
 - [ ] Category dashboard with real-time capacity and budget usage
+
+### Data-supported scope note
+- [x] Stand-space planning is supported by real imported business data.
+- [ ] Product/SKU physical-capacity planning is not currently supported by the available source data.
+- [ ] Any future category/SKU limits will need either a new dataset or a simplified rule table defined by the business.
 
 ### Verification gaps
 - [ ] Automated tests are not currently runnable in this environment because `pytest` is not installed in the local virtual environment.
@@ -174,8 +348,8 @@ Definition of done:
 Goal: support the configuration required for business rules.
 
 1. Model branch grades.
-2. Model department and category allocations in PLU/SKU counts.
-3. Model stand catalogue, stand types, stand capacities, and grade entitlements.
+2. Model department and category allocations in business-rule form.
+3. Model stand catalogue, stand types, simplified stand capacities, and grade entitlements.
 4. Model category budgets by branch x department x category x period.
 5. Extend admin flows so these values can be viewed and maintained.
 
@@ -187,6 +361,7 @@ Definition of done:
 Current status:
 - `stores`, `department_grade_allocations`, and `stand_library` now exist in BigQuery and are readable via the JD repository.
 - Category allocations, stand restrictions by department, and budget modelling are still not implemented.
+- No source-backed product/SKU physical-capacity dataset has been identified yet.
 
 ### Phase 3: Build the real plan builder
 Goal: move from a stand-count demo to an actual planning workflow.
@@ -195,15 +370,15 @@ Goal: move from a stand-count demo to an actual planning workflow.
 2. Correct the plan model so one branch plan can contain multiple departments.
 3. Add category selection within department.
 4. Add stand selection by category.
-5. Add product PLU/SKU selection for each stand.
+5. Add a compact Product Range flow within the Plan Builder using an offcanvas rather than a separate page.
 6. Persist plan composition, not just summary counts.
-7. Handle stand removal and SKU reassignment/removal rules.
+7. Handle stand removal and any later category/SKU reassignment rules.
 
 Definition of done:
 - [ ] A user can create a plan for a branch and period.
 - [ ] A user can retain multiple departments inside one branch plan.
 - [ ] A user can add allowed stands.
-- [ ] A user can assign SKUs to stands.
+- [ ] A user can assign product ranges/items to selected stands using the agreed simplified capacity model.
 - [ ] Plan state survives save/load.
 
 ### Phase 4: Implement the full validation engine
@@ -212,8 +387,8 @@ Goal: enforce the core business rules from the requirements.
 1. Build `validation_service.py`.
 2. Validate stand type allowed by grade.
 3. Validate maximum stands per category.
-4. Validate category PLU/SKU allocation.
-5. Validate stand capacity.
+4. Validate category allocation rules where explicit business limits exist.
+5. Validate stand product capacity using the agreed `arms`-based simplified rule model.
 6. Validate category budget.
 7. Support hard stops and configurable soft warnings.
 8. Return validation results in a consistent structure for UI and reporting.
@@ -226,11 +401,11 @@ Definition of done:
 ### Phase 5: Build the category dashboard
 Goal: provide the real-time visibility required by the brief.
 
-1. Show maximum allowed PLUs/SKUs.
-2. Show current assigned PLUs/SKUs.
+1. Show maximum allowed categories, products, or SKUs based on the actual available rule set.
+2. Show current assigned categories, products, or SKUs where that layer is genuinely implemented.
 3. Show remaining capacity.
 4. Show budget total, used, and remaining.
-5. Update values immediately on stand or SKU changes.
+5. Update values immediately on stand changes and any later category/SKU changes.
 
 Definition of done:
 - [ ] Dashboard reflects live plan state.
@@ -285,7 +460,7 @@ Goal: close quality gaps before submission.
 1. Add unit tests for validation rules.
 2. Add integration tests for plan lifecycle, overrides, and finalisation.
 3. Add role-based permissions.
-4. Prevent duplicate SKU allocation within category.
+4. Prevent duplicate category/SKU allocation if that model is implemented.
 5. Confirm deterministic validation behaviour.
 6. Review performance of recalculation and product search.
 7. Improve docs and architecture notes for submission evidence.
@@ -307,12 +482,12 @@ Definition of done:
 - [ ] Add category selection and stand catalogue support.
 
 ### Session 3
-- [ ] Implement stand selection rules and stand capacity structure.
-- [ ] Start product assignment model.
+- [ ] Implement stand selection rules and stand-capacity rule structure.
+- [ ] Add the product-data query source and define how product rows map to departments.
 
 ### Session 4
-- [ ] Implement category PLU/SKU allocation validation.
-- [ ] Implement stand capacity validation.
+- [ ] Implement category allocation validation if explicit limits are available.
+- [ ] Implement stand product-capacity validation using the agreed `arms` rule model.
 
 ### Session 5
 - [ ] Implement budget model and budget validation.
@@ -338,7 +513,7 @@ Focus on these first:
 
 1. Branch and period planning flow
 2. Category and stand selection
-3. SKU allocation
+3. Category/SKU rule modelling only if supported by defensible source data or explicit business rules
 4. Validation engine
 5. Budget control
 6. Override and audit
@@ -352,13 +527,14 @@ De-scope last:
 - [ ] BigQuery integration beyond demo/local mode
 
 ## Acceptance criteria checklist
-- [ ] User cannot exceed category PLU/SKU limit without override.
-- [ ] User cannot exceed stand PLU/SKU capacity.
+- [ ] User cannot exceed category or SKU limits without override if those limits are defined in a real supported rule model.
+- [ ] User cannot exceed stand capacity under the agreed stand-capacity rule model.
 - [ ] User cannot exceed category budget without override.
 - [ ] User cannot select stand types not permitted by branch grade.
 - [ ] Remaining capacity and budget update immediately.
 - [ ] Finalisation is blocked when blocking rules are breached.
 - [ ] All overrides are fully auditable.
+- [ ] Product-range choices are reviewable and auditable at decision level.
 
 ## Daily update template
 Copy this section into the top of the file or into a session note at the start of each Codex session.
@@ -394,7 +570,7 @@ Copy this section into the top of the file or into a session note at the start o
 Use something like:
 
 ```text
-Read docs/Synoptic-Project-Plan.md, docs/Dawid-Workbook-Implementation-Guide.md, and docs/development-log/Session-08-BigQuery-Reference-Data-Import-and-Repository-Wiring.md. Continue from the latest Daily Update section. Start by updating the plan builder and validation flow to use the BigQuery-backed stores, department_grade_allocations, and stand_library data, then update the docs when finished.
+Read docs/Synoptic-Project-Plan.md, docs/Project-Progress-Summary-2026-03-18.md, and docs/development-log/Session-12-Plan-Builder-State-Safety-and-UX-Polish.md. Continue from the latest Daily Update section. Start by wiring a product BigQuery query behind the repository layer, then implement a Product Range offcanvas on the Plan Builder that assigns products to selected stands using the simplified capacity rule `single = arms + 1` and `double = (arms + 1) * 2`. Add visual guidance for underfilled / just-right / over-capacity states, add tests for the capacity helper and draft-state behaviour, and update the docs when finished.
 ```
 
 ## Notes
@@ -444,6 +620,7 @@ Regards,
 - [x] BigQuery field list has been defined for the first-pass schema.
 - [x] Reference workbook data has been loaded into the first-pass BigQuery tables.
 - [ ] Connect the planning UI and validation flow to the new BigQuery-backed model.
+- [ ] Decide whether future category/SKU rules will be backed by a new dataset or a simplified business-rule model.
 
 ### BigQuery design reminder
 When continuing the data model, prioritise fields for:
